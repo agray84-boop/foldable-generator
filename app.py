@@ -69,30 +69,30 @@ def _parse_expr_friendly(s: str) -> sp.Expr:
 # 2) Notebook-style steps (rendered line-by-line)
 # ============================================================
 
-def _linear_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[Tuple[str, str]]:
+def _linear_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol):
     expr = sp.simplify(left - right)
     poly = sp.Poly(expr, x)
     a = poly.coeff_monomial(x)
     b = poly.coeff_monomial(1)
 
-    steps: List[Tuple[str, str]] = []
+    steps = []
     steps.append(("Given", sp.latex(sp.Eq(left, right))))
     steps.append(("Step 1", sp.latex(sp.Eq(expr, 0))))
     steps.append(("Step 2", sp.latex(sp.Eq(a * x, -b))))
 
     if a == 0:
-        steps.append(("Answer", r"\mathrm{No\ unique\ solution}"))
+        steps.append(("Therefore", r"\therefore\ \mathrm{no\ unique\ solution}"))
         return steps
 
     sol = sp.simplify(-b / a)
     steps.append(("Step 3", sp.latex(sp.Eq(x, sol))))
-    steps.append(("Answer", r"\boxed{x=" + sp.latex(sol) + r"}"))
+    steps.append(("Therefore", r"\therefore\ x=" + sp.latex(sol)))
     return steps
 
 
-def _quadratic_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[Tuple[str, str]]:
+def _quadratic_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol):
     expr = sp.simplify(left - right)
-    steps: List[Tuple[str, str]] = []
+    steps = []
     steps.append(("Given", sp.latex(sp.Eq(left, right))))
     steps.append(("Step 1", sp.latex(sp.Eq(expr, 0))))
 
@@ -100,15 +100,21 @@ def _quadratic_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[Tuple[
     if factored != expr:
         steps.append(("Step 2", sp.latex(sp.Eq(factored, 0))))
         sols = sp.solve(sp.Eq(expr, 0), x)
-        sols = [sp.simplify(s) for s in sols[:2]]
+        sols = [sp.simplify(s) for s in sols]
+
         if len(sols) == 1:
-            steps.append(("Answer", r"\boxed{x=" + sp.latex(sols[0]) + r"}"))
+            steps.append(("Therefore", r"\therefore\ x=" + sp.latex(sols[0])))
         elif len(sols) >= 2:
-            steps.append(("Answer", r"\boxed{x=" + sp.latex(sols[0]) + r",\;x=" + sp.latex(sols[1]) + r"}"))
+            steps.append(
+                ("Therefore",
+                 r"\therefore\ x=" + sp.latex(sols[0]) + r",\ x=" + sp.latex(sols[1]))
+            )
         else:
-            steps.append(("Answer", r"\mathrm{No\ real\ solutions}"))
+            steps.append(("Therefore", r"\therefore\ \mathrm{no\ real\ solutions}"))
+
         return steps[:5]
 
+    # Quadratic Formula path
     poly = sp.Poly(expr, x)
     a = poly.coeff_monomial(x**2)
     b = poly.coeff_monomial(x)
@@ -116,27 +122,39 @@ def _quadratic_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[Tuple[
     disc = sp.simplify(b**2 - 4*a*c)
 
     steps.append(("Step 2", r"x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}"))
-    steps.append(("Step 3", r"x=\frac{" + sp.latex(-b) + r"\pm\sqrt{" + sp.latex(disc) + r"}}{" + sp.latex(2*a) + r"}"))
+    steps.append(("Step 3",
+                  r"x=\frac{" + sp.latex(-b) +
+                  r"\pm\sqrt{" + sp.latex(disc) +
+                  r"}}{" + sp.latex(2*a) + r"}"))
 
     sols = sp.solve(sp.Eq(expr, 0), x)
-    sols = [sp.simplify(s) for s in sols[:2]]
+    sols = [sp.simplify(s) for s in sols]
+
     if len(sols) == 1:
-        steps.append(("Answer", r"\boxed{x=" + sp.latex(sols[0]) + r"}"))
+        steps.append(("Therefore", r"\therefore\ x=" + sp.latex(sols[0])))
     elif len(sols) >= 2:
-        steps.append(("Answer", r"\boxed{x=" + sp.latex(sols[0]) + r",\;x=" + sp.latex(sols[1]) + r"}"))
+        steps.append(
+            ("Therefore",
+             r"\therefore\ x=" + sp.latex(sols[0]) + r",\ x=" + sp.latex(sols[1]))
+        )
     else:
-        steps.append(("Answer", r"\mathrm{No\ real\ solutions}"))
+        steps.append(("Therefore", r"\therefore\ \mathrm{no\ real\ solutions}"))
 
     return steps[:5]
 
 
-def _expression_steps(expr: sp.Expr) -> List[Tuple[str, str]]:
+def _expression_steps(expr: sp.Expr):
     simp = sp.simplify(expr)
     return [
         ("Given", sp.latex(expr)),
         ("Step 1", sp.latex(simp)),
-        ("Answer", r"\boxed{" + sp.latex(simp) + r"}"),
+        ("Therefore", r"\therefore\ " + sp.latex(simp)),
     ]
+
+
+
+
+
 
 
 def compute_steps_from_input(raw: str, var: str = "x") -> Tuple[str, Optional[List[Tuple[str, str]]]]:
@@ -374,3 +392,4 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
