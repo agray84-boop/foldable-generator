@@ -266,79 +266,169 @@ def _draw_worked_lines(c: Canvas, steps: List[Tuple[str, str]], x0: float, x1: f
 # ============================================================
 # 4) Build PDF with your fold layout
 # ============================================================
-
 def build_foldable_pdf(out_path: str,
                        eq1_ltx: str, eq1_steps: Optional[List[Tuple[str, str]]],
                        eq2_ltx: str, eq2_steps: Optional[List[Tuple[str, str]]],
                        eq3_ltx: str, eq3_steps: Optional[List[Tuple[str, str]]]):
+    """
+    Horizontal bands layout to match the sample:
+      Fold lines are HORIZONTAL at y = 2.75", 5.5", 8.25" from the TOP.
+
+    FRONT (top to bottom bands):
+      Band 1: #2 problem only + "Fold center, These 2 folds facing each other"
+      Band 2: #3 worked + "Fold 3rd. This side out"
+      Band 3: Open First + "Fold 1st. This side out."
+      Band 4: #1 problem only + "Fold 2nd. Fold under"
+
+    BACK (rotated 180 degrees):
+      Band 1: #1 worked
+      Band 2: empty
+      Band 3: #3 problem only
+      Band 4: #2 worked
+    """
     page_w, page_h = letter
     c = Canvas(out_path, pagesize=letter)
 
-    xs = [0, 2.75 * inch, 5.5 * inch, 8.25 * inch, page_w]
+    # Horizontal band boundaries (measured from TOP to match your directions)
+    # y_from_top in inches: 0, 2.75, 5.5, 8.25, 11
+    y_top = page_h
+    y_marks_from_top = [0.0, 2.75 * inch, 5.5 * inch, 8.25 * inch, 11.0 * inch]
+    ys = [y_top - m for m in y_marks_from_top]  # convert to canvas y coords
+    # ys = [top, line1, line2, line3, bottom]
 
-    def fold_lines():
+    def fold_lines_horizontal():
         c.saveState()
         c.setDash(6, 6)
         c.setLineWidth(1)
-        for x in xs[1:-1]:
-            c.line(x, 0.5 * inch, x, page_h - 0.5 * inch)
+        for y in (ys[1], ys[2], ys[3]):
+            c.line(0.5 * inch, y, page_w - 0.5 * inch, y)
         c.restoreState()
 
-    # FRONT
-    fold_lines()
+    def draw_boxed_label(x: float, y: float, text: str):
+        # top-left label box inside a band (y is band top)
+        box_w, box_h = 0.55 * inch, 0.35 * inch
+        pad_x = 0.35 * inch
+        pad_y = 0.35 * inch
+        c.saveState()
+        c.setLineWidth(1.2)
+        c.rect(x + pad_x, y - pad_y - box_h, box_w, box_h, stroke=1, fill=0)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawCentredString(x + pad_x + box_w / 2, y - pad_y - box_h + 0.10 * inch, text)
+        c.restoreState()
 
-    # Q1: #2 problem only
-    _draw_math_centered(c, eq2_ltx, (xs[0] + xs[1]) / 2, page_h / 2,
-                        (xs[1] - xs[0]) - 0.6 * inch, page_h - 2.0 * inch, 16)
+    def band_rect(band_index: int):
+        # band_index: 0=top band, 3=bottom band
+        band_top = ys[band_index]
+        band_bottom = ys[band_index + 1]
+        return band_top, band_bottom
 
-    # Q2: #3 worked (or problem if not solvable)
+    def band_content_box(band_index: int):
+        # returns (content_left, content_right, content_bottom, content_top)
+        band_top, band_bottom = band_rect(band_index)
+        left = 0.6 * inch
+        right = page_w - 0.6 * inch
+        top = band_top - 0.55 * inch
+        bottom = band_bottom + 0.45 * inch
+        return left, right, bottom, top
+
+    def draw_math_in_band_center(band_index: int, latex: str, font_size: int = 16):
+        left, right, bottom, top = band_content_box(band_index)
+        cx = (left + right) / 2
+        cy = (bottom + top) / 2
+        _draw_math_centered(c, latex, cx, cy, (right - left), (top - bottom), font_size)
+
+    def draw_worked_in_band(band_index: int, steps: List[Tuple[str, str]]):
+        # Reuse your line-by-line notebook renderer but mapped to band box
+        left, right, bottom, top = band_content_box(band_index)
+
+        # Temporarily adapt the existing _draw_worked_lines by creating a wrapper
+        # that uses x0/x1 and page_h consistent with current coordinate system.
+        # We'll place labels/math starting near the top of the band.
+        pad_x = 0.15 * inch
+        x0 = left + pad_x
+        x1 = right - pad_x
+
+        # Custom vertical placement inside the band:
+        line_gap = (top - bottom) / 4.2
+        start_y = top - 0.15 * inch
+
+        for idx, (label, math_ltx) in enumerate(steps[:5]):
+            y = start_y - idx * line_gap
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(x0, y, f"{label}:")
+
+            math_region_w = (x1 - x0) * 0.78
+            math_region_h = min(0.70 * inch, line_gap * 0.9)
+            math_x_center = x0 + (x1 - x0) * 0.62
+            math_y_center = y + 0.08 * inch
+
+            _draw_math_centered(c, math_ltx, math_x_center, math_y_center, math_region_w, math_region_h, 16)
+
+    # ---------------- FRONT ----------------
+    fold_lines_horizontal()
+
+    # Band 1 (top): #2 problem only + top note
+    draw_boxed_label(0, ys[0], "#2")
+    c.setFont("Helvetica-Bold", 12)
+    c.drawCentredString(page_w / 2, ys[0] - 0.35 * inch, "Fold center, These 2 folds")
+    c.drawCentredString(page_w / 2, ys[0] - 0.55 * inch, "facing each other")
+    draw_math_in_band_center(0, eq2_ltx, 16)
+
+    # Band 2: #3 worked + fold note on the fold line above it
+    # Put the note centered on the fold line between band 1 and 2 (ys[1])
+    c.setFont("Helvetica-Bold", 13)
+    c.drawCentredString(page_w / 2, ys[1] - 0.20 * inch, "Fold 3rd. This side out")
+    draw_boxed_label(0, ys[1], "#3")
     if eq3_steps:
-        _draw_worked_lines(c, eq3_steps, xs[1], xs[2], page_h)
+        draw_worked_in_band(1, eq3_steps)
     else:
-        _draw_math_centered(c, eq3_ltx, (xs[1] + xs[2]) / 2, page_h / 2,
-                            (xs[2] - xs[1]) - 0.6 * inch, page_h - 2.0 * inch, 16)
+        draw_math_in_band_center(1, eq3_ltx, 16)
 
-    # Q3: Open First
+    # Band 3: Open First + fold note on fold line between band 2 and 3 (ys[2])
+    c.setFont("Helvetica-Bold", 13)
+    c.drawCentredString(page_w / 2, ys[2] - 0.20 * inch, "Fold 1st. This side out.")
     c.setFont("Helvetica-Bold", 24)
-    c.drawCentredString((xs[2] + xs[3]) / 2, page_h / 2, "Open First")
+    band3_top, band3_bottom = band_rect(2)
+    c.drawCentredString(page_w / 2, (band3_top + band3_bottom) / 2, "Open First")
 
-    # Q4: #1 problem only
-    _draw_math_centered(c, eq1_ltx, (xs[3] + xs[4]) / 2, page_h / 2,
-                        (xs[4] - xs[3]) - 0.6 * inch, page_h - 2.0 * inch, 16)
+    # Band 4 (bottom): #1 problem only + fold note on fold line between band 3 and 4 (ys[3])
+    c.setFont("Helvetica-Bold", 13)
+    c.drawCentredString(page_w / 2, ys[3] - 0.20 * inch, "Fold 2nd. Fold under")
+    draw_boxed_label(0, ys[3], "#1")
+    draw_math_in_band_center(3, eq1_ltx, 16)
 
     c.showPage()
 
-    # BACK (rotate 180)
+    # ---------------- BACK (rotated 180°) ----------------
     c.saveState()
     c.translate(page_w, page_h)
     c.rotate(180)
 
-    fold_lines()
+    fold_lines_horizontal()
 
-    # Back Q1: #1 worked
+    # Back Band 1: #1 worked
+    draw_boxed_label(0, ys[0], "#1")
     if eq1_steps:
-        _draw_worked_lines(c, eq1_steps, xs[0], xs[1], page_h)
+        draw_worked_in_band(0, eq1_steps)
     else:
-        _draw_math_centered(c, eq1_ltx, (xs[0] + xs[1]) / 2, page_h / 2,
-                            (xs[1] - xs[0]) - 0.6 * inch, page_h - 2.0 * inch, 16)
+        draw_math_in_band_center(0, eq1_ltx, 16)
 
-    # Back Q2 empty
+    # Back Band 2: empty (do nothing)
 
-    # Back Q3: #3 problem only
-    _draw_math_centered(c, eq3_ltx, (xs[2] + xs[3]) / 2, page_h / 2,
-                        (xs[3] - xs[2]) - 0.6 * inch, page_h - 2.0 * inch, 16)
+    # Back Band 3: #3 problem only
+    draw_boxed_label(0, ys[2], "#3")
+    draw_math_in_band_center(2, eq3_ltx, 16)
 
-    # Back Q4: #2 worked
+    # Back Band 4: #2 worked
+    draw_boxed_label(0, ys[3], "#2")
     if eq2_steps:
-        _draw_worked_lines(c, eq2_steps, xs[3], xs[4], page_h)
+        draw_worked_in_band(3, eq2_steps)
     else:
-        _draw_math_centered(c, eq2_ltx, (xs[3] + xs[4]) / 2, page_h / 2,
-                            (xs[4] - xs[3]) - 0.6 * inch, page_h - 2.0 * inch, 16)
+        draw_math_in_band_center(3, eq2_ltx, 16)
 
     c.restoreState()
     c.showPage()
     c.save()
-
 
 # ============================================================
 # 5) Streamlit UI
@@ -392,4 +482,5 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
 
