@@ -1,4 +1,12 @@
 import streamlit as st
+
+try:
+    from foldable_engine import problem_and_steps, notebook_aligned, build_foldable
+except Exception as e:
+    st.error("foldable_engine.py failed to import. See the error below:")
+    st.exception(e)
+    st.stop()
+import streamlit as st
 from foldable_engine import problem_and_steps, notebook_aligned, build_foldable
 
 st.set_page_config(page_title="Math Foldable Generator", layout="centered")
@@ -61,3 +69,4 @@ if st.button("Generate Foldable PDF", type="primary"):
             "Try adding parentheses or using ^ for exponents."
         )
 st.exception(e)
+
