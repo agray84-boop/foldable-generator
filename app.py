@@ -292,7 +292,8 @@ def build_foldable_pdf(out_path: str,
             return
         band_top, _ = band_rect(band_index)
         c.setFont("Helvetica-Bold", 14)
-        c.drawCentredString(page_w / 2, band_top - 0.40 * inch, text.strip())
+        c.drawCentredString(page_w / 2, band_top - 0.80 * inch, text.strip())
+
 
     def draw_math_in_band_center(band_index: int, latex: str, font_size: int = 16):
         left, right, bottom, top = band_content_box(band_index)
@@ -452,3 +453,4 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
