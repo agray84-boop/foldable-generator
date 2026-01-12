@@ -19,6 +19,12 @@ from reportlab.lib.utils import ImageReader
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from sympy.parsing.sympy_parser import (
+    parse_expr,
+    standard_transformations,
+    implicit_multiplication_application,
+    convert_xor,
+)
 
 
 # ----------------------------
@@ -163,6 +169,21 @@ def _expression_steps(expr: sp.Expr) -> List[str]:
     lines.append(step("Answer", final_box(ltx(final))))
     return lines[:5]
 
+_TRANSFORMS = standard_transformations + (
+    implicit_multiplication_application,
+    convert_xor,
+)
+
+def _parse(s: str) -> sp.Expr:
+    """
+    More forgiving parser:
+    - understands 2x as 2*x
+    - understands x^2 as x**2
+    - handles spaces well
+    """
+    s = _normalize_math(s)
+    # parse_expr will handle implicit multiplication cleanly
+    return parse_expr(s, transformations=_TRANSFORMS, evaluate=True)
 
 def problem_and_steps(raw: str, var: str = "x") -> Tuple[str, List[str]]:
     """
@@ -175,8 +196,9 @@ def problem_and_steps(raw: str, var: str = "x") -> Tuple[str, List[str]]:
 
     if "=" in norm:
         left_str, right_str = norm.split("=", 1)
-        left = sp.sympify(left_str)
-        right = sp.sympify(right_str)
+        left = _parse(left_str)
+right = _parse(right_str)
+
 
         expr = sp.simplify(left - right)
         deg = sp.Poly(expr, x).degree() if expr.has(x) else 0
@@ -205,7 +227,8 @@ def problem_and_steps(raw: str, var: str = "x") -> Tuple[str, List[str]]:
         return problem_latex, steps
 
     # Expression
-    expr = sp.sympify(norm)
+   expr = _parse(norm)
+
     problem_latex = ltx(expr)
     steps = _expression_steps(expr)
     return problem_latex, steps
@@ -393,3 +416,4 @@ def build_foldable(
     c.showPage()
     c.save()
     return out_path
+
