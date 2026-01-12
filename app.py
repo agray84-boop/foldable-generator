@@ -60,3 +60,4 @@ if st.button("Generate Foldable PDF", type="primary"):
             "One of the inputs could not be read. "
             "Try adding parentheses or using ^ for exponents."
         )
+st.exception(e)
