@@ -355,7 +355,7 @@ def build_foldable_pdf(out_path: str,
         for idx, (label, math_ltx) in enumerate(steps[:5]):
             y = start_y - idx * line_gap
             c.setFont("Helvetica-Bold", 11)
-            c.drawString(x0, y, f"{label}:")
+        
 
             math_region_w = (x1 - x0) * 0.78
             math_region_h = min(0.70 * inch, line_gap * 0.9)
@@ -482,5 +482,6 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
 
 
