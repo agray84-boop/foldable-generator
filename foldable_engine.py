@@ -1,22 +1,8 @@
-from __fu"""
-foldable_trifold_latex_notebook_steps.py
+# foldable_engine.py
+# Engine for Streamlit app: generates a 2-page foldable PDF with LaTeX-rendered math
+# and notebook-style multi-step solutions.
 
-Teacher enters 3 equations/expressions.
-Creates a 2-page foldable PDF (Front + Back) with:
-- true stacked fractions/exponents (LaTeX rendering)
-- notebook-style solutions with Step labels
-- dashed fold lines at 2.75", 5.5", 8.25" on front and back
-- back page rotated 180 degrees
-
-Install:
-  pip install reportlab sympy matplotlib pillow
-Run:
-  python foldable_trifold_latex_notebook_steps.py
-Output:
-  foldable_output.pdf
-"""
-
-ture__ import annotations
+from __future__ import annotations
 
 import os
 import re
@@ -24,6 +10,7 @@ import tempfile
 from typing import Tuple, List, Optional
 
 import sympy as sp
+
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.pdfgen.canvas import Canvas
@@ -42,10 +29,10 @@ def _normalize_math(s: str) -> str:
     s = s.strip()
     s = s.replace("−", "-").replace("^", "**").replace("·", "*")
 
-    # Insert * for implicit multiplication patterns
-    s = re.sub(r"(\d)([a-zA-Z(])", r"\1*\2", s)     # 2x, 3(x+1)
-    s = re.sub(r"([a-zA-Z])\(", r"\1*(", s)         # x(x+1)
-    s = re.sub(r"\)([a-zA-Z0-9])", r")*\1", s)      # )( or )2
+    # Insert * for implicit multiplication patterns: 2x -> 2*x, 3(x+1) -> 3*(x+1)
+    s = re.sub(r"(\d)([a-zA-Z(])", r"\1*\2", s)
+    s = re.sub(r"([a-zA-Z])\(", r"\1*(", s)
+    s = re.sub(r"\)([a-zA-Z0-9])", r")*\1", s)
     return s
 
 
@@ -59,43 +46,23 @@ def ltx(x) -> str:
 def eq_ltx(L, R) -> str:
     return sp.latex(sp.Eq(L, R))
 
-
-def notebook_aligned(step_lines: List[str]) -> str:
-    """
-    Builds a notebook-style aligned block with:
-      Step 1:  ...
-      Step 2:  ...
-    Uses an alignment point so steps line up nicely.
-    """
-    # Each line should already contain "&" for alignment.
-    body = r" \\ ".join(step_lines)
-    return r"\begin{aligned}" + body + r"\end{aligned}"
-
-
 def step(label: str, math: str) -> str:
-    """
-    One aligned line:
-      \text{Step 1: } & <math>
-    """
-    return rf"\text{{{label}}}\; & {math}"
-
+    # aligned line: "Step 1:  <math>"
+    return rf"\text{{{label}:}}\; & {math}"
 
 def final_box(math: str) -> str:
     return rf"\boxed{{{math}}}"
 
+def notebook_aligned(step_lines: List[str]) -> str:
+    body = r" \\ ".join(step_lines)
+    return r"\begin{aligned}" + body + r"\end{aligned}"
+
 
 # ----------------------------
-# Step generation (Notebook style)
+# Notebook-style step generation
 # ----------------------------
 
-def linear_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
-    """
-    Notebook steps for linear equations:
-      Step 1: combine like terms (move to one side)
-      Step 2: isolate ax
-      Step 3: divide
-      Final: boxed
-    """
+def _linear_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
     expr = sp.simplify(left - right)
     poly = sp.Poly(expr, x)
     a = poly.coeff_monomial(x)
@@ -103,36 +70,24 @@ def linear_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
 
     lines: List[str] = []
     lines.append(step("Given", eq_ltx(left, right)))
-
-    # Step 1: move everything to left side
     lines.append(step("Step 1", eq_ltx(expr, 0)))
 
-    # Step 2: move constant term
     if b != 0:
-        lines.append(step("Step 2", eq_ltx(a*x, -b)))
+        lines.append(step("Step 2", eq_ltx(a * x, -b)))
     else:
-        lines.append(step("Step 2", eq_ltx(a*x, 0)))
+        lines.append(step("Step 2", eq_ltx(a * x, 0)))
 
-    # Step 3: divide by a
     if a != 0:
-        sol = sp.simplify((-b)/a)
+        sol = sp.simplify((-b) / a)
         lines.append(step("Step 3", eq_ltx(x, sol)))
         lines.append(step("Answer", final_box(rf"x={ltx(sol)}")))
     else:
         lines.append(step("Answer", r"\text{No unique solution}"))
 
-    # Keep it tight
     return lines[:5]
 
 
-def quadratic_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
-    """
-    Notebook steps for quadratics:
-    - Step 1: standard form
-    - Step 2: factor OR quadratic formula setup
-    - Step 3: solve
-    - Answer: boxed solutions
-    """
+def _quadratic_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
     expr = sp.simplify(left - right)
     poly = sp.Poly(expr, x)
     a = poly.coeff_monomial(x**2)
@@ -146,57 +101,41 @@ def quadratic_steps(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
     factored = sp.factor(expr)
     sols = sp.solve(sp.Eq(expr, 0), x)
 
-    # If factors nicely, use zero product property
+    # If it factors nicely, use factoring path
     if factored != expr:
         lines.append(step("Step 2", eq_ltx(factored, 0)))
-
         if sols:
-            # show solutions line
-            if len(sols) == 1:
-                s0 = sp.simplify(sols[0])
-                lines.append(step("Step 3", eq_ltx(x, s0)))
-                lines.append(step("Answer", final_box(rf"x={ltx(s0)}")))
+            shown = [sp.simplify(s) for s in sols[:2]]
+            if len(shown) == 1:
+                lines.append(step("Step 3", rf"x={ltx(shown[0])}"))
+                lines.append(step("Answer", final_box(rf"x={ltx(shown[0])}")))
             else:
-                s0 = sp.simplify(sols[0])
-                s1 = sp.simplify(sols[1])
-                lines.append(step("Step 3", rf"x={ltx(s0)},\; x={ltx(s1)}"))
-                lines.append(step("Answer", final_box(rf"x={ltx(s0)},\; x={ltx(s1)}")))
+                soltxt = rf"x={ltx(shown[0])},\; x={ltx(shown[1])}"
+                lines.append(step("Step 3", soltxt))
+                lines.append(step("Answer", final_box(soltxt)))
         else:
             lines.append(step("Answer", r"\text{No real solutions}"))
-
         return lines[:5]
 
-    # Otherwise: quadratic formula (still notebook style)
+    # Otherwise, quadratic formula path
     lines.append(step("Step 2", r"x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}"))
-
     disc = sp.simplify(b**2 - 4*a*c)
-    lines.append(step(
-        "Step 3",
-        rf"x=\frac{{{ltx(-b)}\pm\sqrt{{{ltx(disc)}}}}}{{{ltx(2*a)}}}"
-    ))
+    lines.append(step("Step 3", rf"x=\frac{{{ltx(-b)}\pm\sqrt{{{ltx(disc)}}}}}{{{ltx(2*a)}}}"))
 
     if sols:
-        if len(sols) == 1:
-            s0 = sp.simplify(sols[0])
-            lines.append(step("Answer", final_box(rf"x={ltx(s0)}")))
+        shown = [sp.simplify(s) for s in sols[:2]]
+        if len(shown) == 1:
+            lines.append(step("Answer", final_box(rf"x={ltx(shown[0])}")))
         else:
-            s0 = sp.simplify(sols[0])
-            s1 = sp.simplify(sols[1])
-            lines.append(step("Answer", final_box(rf"x={ltx(s0)},\; x={ltx(s1)}")))
+            soltxt = rf"x={ltx(shown[0])},\; x={ltx(shown[1])}"
+            lines.append(step("Answer", final_box(soltxt)))
     else:
         lines.append(step("Answer", r"\text{No real solutions}"))
 
     return lines[:5]
 
 
-def expression_steps(expr: sp.Expr) -> List[str]:
-    """
-    Notebook-style simplification:
-      Given
-      Step 1: expand OR combine
-      Step 2: factor OR cancel
-      Answer: boxed final
-    """
+def _expression_steps(expr: sp.Expr) -> List[str]:
     lines: List[str] = []
     lines.append(step("Given", ltx(expr)))
 
@@ -205,13 +144,12 @@ def expression_steps(expr: sp.Expr) -> List[str]:
         lines.append(step("Step 1", ltx(expanded)))
         current = expanded
     else:
-        current = expr
-        lines.append(step("Step 1", ltx(sp.simplify(current))))
+        current = sp.simplify(expr)
+        lines.append(step("Step 1", ltx(current)))
 
-    # Try rational simplification/cancel
+    # Try simplifying rational expressions (cancel)
     together = sp.together(current)
     canceled = sp.cancel(together)
-
     if canceled != current:
         lines.append(step("Step 2", ltx(canceled)))
         current = canceled
@@ -223,7 +161,6 @@ def expression_steps(expr: sp.Expr) -> List[str]:
 
     final = sp.simplify(current)
     lines.append(step("Answer", final_box(ltx(final))))
-
     return lines[:5]
 
 
@@ -231,7 +168,7 @@ def problem_and_steps(raw: str, var: str = "x") -> Tuple[str, List[str]]:
     """
     Returns:
       problem_latex (for problem-only panels)
-      step_lines (notebook aligned lines for worked panels)
+      steps (list of aligned 'notebook' lines for worked-solution panels)
     """
     x = sp.Symbol(var)
     norm = _normalize_math(raw)
@@ -247,11 +184,10 @@ def problem_and_steps(raw: str, var: str = "x") -> Tuple[str, List[str]]:
         problem_latex = eq_ltx(left, right)
 
         if deg == 1:
-            steps = linear_steps(left, right, x)
+            steps = _linear_steps(left, right, x)
         elif deg == 2:
-            steps = quadratic_steps(left, right, x)
+            steps = _quadratic_steps(left, right, x)
         else:
-            # Fallback: show move to zero + solve
             sols = sp.solve(sp.Eq(expr, 0), x)
             steps = [
                 step("Given", eq_ltx(left, right)),
@@ -271,7 +207,7 @@ def problem_and_steps(raw: str, var: str = "x") -> Tuple[str, List[str]]:
     # Expression
     expr = sp.sympify(norm)
     problem_latex = ltx(expr)
-    steps = expression_steps(expr)
+    steps = _expression_steps(expr)
     return problem_latex, steps
 
 
@@ -279,7 +215,7 @@ def problem_and_steps(raw: str, var: str = "x") -> Tuple[str, List[str]]:
 # LaTeX -> PNG rendering
 # ----------------------------
 
-def render_to_png(math_latex: str, font_size: int = 16, dpi: int = 300) -> str:
+def _render_to_png(math_latex: str, font_size: int = 16, dpi: int = 300) -> str:
     s = math_latex.strip()
     if not (s.startswith("$") and s.endswith("$")):
         s = f"${s}$"
@@ -309,9 +245,16 @@ def render_to_png(math_latex: str, font_size: int = 16, dpi: int = 300) -> str:
     return path
 
 
-def draw_math_centered(c: Canvas, math_latex: str, x_center: float, y_center: float,
-                       box_w: float, box_h: float, target_font_size: int = 16) -> None:
-    png_path = render_to_png(math_latex, font_size=target_font_size)
+def _draw_math_centered(
+    c: Canvas,
+    math_latex: str,
+    x_center: float,
+    y_center: float,
+    box_w: float,
+    box_h: float,
+    target_font_size: int = 16
+) -> None:
+    png_path = _render_to_png(math_latex, font_size=target_font_size)
     try:
         img = ImageReader(png_path)
         iw, ih = img.getSize()
@@ -326,10 +269,10 @@ def draw_math_centered(c: Canvas, math_latex: str, x_center: float, y_center: fl
 
 
 # ----------------------------
-# PDF layout
+# PDF layout for your foldable
 # ----------------------------
 
-def draw_dashed_fold_lines(c: Canvas, page_h: float) -> None:
+def _draw_dashed_fold_lines(c: Canvas, page_h: float) -> None:
     xs = [2.75 * inch, 5.5 * inch, 8.25 * inch]
     c.saveState()
     c.setDash(6, 6)
@@ -339,7 +282,7 @@ def draw_dashed_fold_lines(c: Canvas, page_h: float) -> None:
     c.restoreState()
 
 
-def draw_boxed_label(c: Canvas, x: float, y: float, text: str) -> None:
+def _draw_boxed_label(c: Canvas, x: float, y: float, text: str) -> None:
     box_w, box_h = 0.55 * inch, 0.35 * inch
     c.saveState()
     c.setLineWidth(1.2)
@@ -349,13 +292,20 @@ def draw_boxed_label(c: Canvas, x: float, y: float, text: str) -> None:
     c.restoreState()
 
 
-def quadrant_content_box(c: Canvas, x0: float, x1: float, page_h: float,
-                         label: Optional[str], top_text: Optional[str], bottom_text: Optional[str]):
+def _quadrant_content_box(
+    c: Canvas,
+    x0: float,
+    x1: float,
+    page_h: float,
+    label: Optional[str],
+    top_text: Optional[str],
+    bottom_text: Optional[str],
+):
     pad_x = 0.20 * inch
     quad_center_x = (x0 + x1) / 2
 
     if label:
-        draw_boxed_label(c, x0 + pad_x, page_h - 0.75 * inch, label)
+        _draw_boxed_label(c, x0 + pad_x, page_h - 0.75 * inch, label)
 
     if top_text:
         c.setFont("Helvetica-Bold", 11)
@@ -365,19 +315,20 @@ def quadrant_content_box(c: Canvas, x0: float, x1: float, page_h: float,
         c.setFont("Helvetica-Bold", 11)
         c.drawCentredString(quad_center_x, 0.75 * inch, bottom_text)
 
-    # generous content area for centering
-    content_x = x0 + pad_x
+    # Content area for centering math
     content_w = (x1 - x0) - 2 * pad_x
-    content_y = 1.20 * inch
     content_h = page_h - 2.35 * inch
-    return content_x, content_y, content_w, content_h
+    content_y = 1.20 * inch
+
+    return content_y, content_w, content_h
 
 
-def build_foldable(out_path: str,
-                   eq1: Tuple[str, str, List[str]],
-                   eq2: Tuple[str, str, List[str]],
-                   eq3: Tuple[str, str, List[str]]) -> str:
-
+def build_foldable(
+    out_path: str,
+    eq1: Tuple[str, str, List[str]],
+    eq2: Tuple[str, str, List[str]],
+    eq3: Tuple[str, str, List[str]],
+) -> str:
     page_w, page_h = letter
     c = Canvas(out_path, pagesize=letter)
 
@@ -392,28 +343,28 @@ def build_foldable(out_path: str,
     p3, block3, _ = eq3
 
     # -------- FRONT --------
-    draw_dashed_fold_lines(c, page_h)
+    _draw_dashed_fold_lines(c, page_h)
 
     # Front Q1: #2 problem only
-    cx, cy, cw, ch = quadrant_content_box(
+    cy, cw, ch = _quadrant_content_box(
         c, xA, xB, page_h, "#2",
         "These two folds face each other",
         "Fold 3rd.  This side out."
     )
-    draw_math_centered(c, f"${p2}$", (xA + xB)/2, cy + ch/2, cw, ch, 16)
+    _draw_math_centered(c, f"${p2}$", (xA + xB)/2, cy + ch/2, cw, ch, 16)
 
-    # Front Q2: #3 worked
-    cx, cy, cw, ch = quadrant_content_box(c, xB, xC, page_h, "#3", None, None)
-    draw_math_centered(c, f"${block3}$", (xB + xC)/2, cy + ch/2, cw, ch, 16)
+    # Front Q2: #3 worked (multi-step)
+    cy, cw, ch = _quadrant_content_box(c, xB, xC, page_h, "#3", None, None)
+    _draw_math_centered(c, f"${block3}$", (xB + xC)/2, cy + ch/2, cw, ch, 16)
 
     # Front Q3: Open First
-    cx, cy, cw, ch = quadrant_content_box(c, xC, xD, page_h, None, "Fold 1st.  This side out.", None)
+    _quadrant_content_box(c, xC, xD, page_h, None, "Fold 1st.  This side out.", None)
     c.setFont("Helvetica-Bold", 24)
     c.drawCentredString((xC + xD)/2, page_h/2, "Open First")
 
     # Front Q4: #1 problem only
-    cx, cy, cw, ch = quadrant_content_box(c, xD, xE, page_h, "#1", "Fold 2nd.  Fold under.", None)
-    draw_math_centered(c, f"${p1}$", (xD + xE)/2, cy + ch/2, cw, ch, 16)
+    cy, cw, ch = _quadrant_content_box(c, xD, xE, page_h, "#1", "Fold 2nd.  Fold under.", None)
+    _draw_math_centered(c, f"${p1}$", (xD + xE)/2, cy + ch/2, cw, ch, 16)
 
     c.showPage()
 
@@ -422,56 +373,23 @@ def build_foldable(out_path: str,
     c.translate(page_w, page_h)
     c.rotate(180)
 
-    draw_dashed_fold_lines(c, page_h)
+    _draw_dashed_fold_lines(c, page_h)
 
     # Back Q1: #1 worked
-    cx, cy, cw, ch = quadrant_content_box(c, xA, xB, page_h, "#1", None, None)
-    draw_math_centered(c, f"${block1}$", (xA + xB)/2, cy + ch/2, cw, ch, 16)
+    cy, cw, ch = _quadrant_content_box(c, xA, xB, page_h, "#1", None, None)
+    _draw_math_centered(c, f"${block1}$", (xA + xB)/2, cy + ch/2, cw, ch, 16)
 
-    # Back Q2: empty
+    # Back Q2: empty (do nothing)
 
     # Back Q3: #3 problem only
-    cx, cy, cw, ch = quadrant_content_box(c, xC, xD, page_h, "#3", None, None)
-    draw_math_centered(c, f"${p3}$", (xC + xD)/2, cy + ch/2, cw, ch, 16)
+    cy, cw, ch = _quadrant_content_box(c, xC, xD, page_h, "#3", None, None)
+    _draw_math_centered(c, f"${p3}$", (xC + xD)/2, cy + ch/2, cw, ch, 16)
 
     # Back Q4: #2 worked
-    cx, cy, cw, ch = quadrant_content_box(c, xD, xE, page_h, "#2", None, None)
-    draw_math_centered(c, f"${block2}$", (xD + xE)/2, cy + ch/2, cw, ch, 16)
+    cy, cw, ch = _quadrant_content_box(c, xD, xE, page_h, "#2", None, None)
+    _draw_math_centered(c, f"${block2}$", (xD + xE)/2, cy + ch/2, cw, ch, 16)
 
     c.restoreState()
     c.showPage()
     c.save()
     return out_path
-
-
-def main():
-    print("\n=== Foldable Generator (Notebook Steps + LaTeX) ===")
-    print("Enter 3 expressions or equations.")
-    print("Examples:")
-    print("  2x+3=11")
-    print("  x^2-5x+6=0")
-    print("  (x^3*y^2)^4/(x*y^5)\n")
-
-    raw1 = input("Enter Equation/Expression #1: ").strip()
-    raw2 = input("Enter Equation/Expression #2: ").strip()
-    raw3 = input("Enter Equation/Expression #3: ").strip()
-
-    p1, steps1 = problem_and_steps(raw1, var="x")
-    p2, steps2 = problem_and_steps(raw2, var="x")
-    p3, steps3 = problem_and_steps(raw3, var="x")
-
-    block1 = notebook_aligned(steps1)
-    block2 = notebook_aligned(steps2)
-    block3 = notebook_aligned(steps3)
-
-    build_foldable(
-        "foldable_output.pdf",
-        (p1, block1, steps1),
-        (p2, block2, steps2),
-        (p3, block3, steps3),
-    )
-
-    print("\nDone! Created: foldable_output.pdf")
-    print("Printing tip: Print double-sided. If alignment is off, try 'Flip on short edge'.\n")
-
-
