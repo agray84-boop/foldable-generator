@@ -34,15 +34,17 @@ _TRANSFORMS = standard_transformations + (
 def _normalize_word_text(s: str) -> str:
     """
     Normalize what teachers paste from Word into a textbox.
-    - Keeps ^ (Word often pastes x^6 correctly)
-    - Supports unicode minus and multiplication symbols
-    - Leaves / for fractions
+    Supports:
+      - unicode minus and multiplication symbols
+      - exponents via ^
+      - classroom shorthand 1/2x -> (1/2)*x
+      - unicode radicals like √63 or √(x+1) -> sqrt(63), sqrt(x+1)
     """
     s = (s or "").strip()
     s = s.replace("−", "-").replace("·", "*").replace("×", "*")
     s = re.sub(r"\s+", " ", s).strip()
 
-    # Optional: convert unicode superscripts if they appear (rare but harmless)
+    # Convert unicode superscripts if they appear (e.g., x⁶ -> x^6)
     sup_map = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
     s = re.sub(
         r"([A-Za-z])([⁰¹²³⁴⁵⁶⁷⁸⁹]+)",
@@ -52,6 +54,18 @@ def _normalize_word_text(s: str) -> str:
 
     # Interpret classroom shorthand: 1/2x means (1/2)*x
     s = re.sub(r'(\d+)\s*/\s*(\d+)\s*([A-Za-z])', r'(\1/\2)*\3', s)
+
+    # --- RADICAL SUPPORT ---
+    # √(something)  -> sqrt(something)
+    s = re.sub(r"√\s*\(([^)]+)\)", r"sqrt(\1)", s)
+
+    # √63, √x, √7x -> sqrt(63), sqrt(x), sqrt(7x)
+    # (Stops at whitespace or operator)
+    s = re.sub(r"√\s*([A-Za-z0-9]+)", r"sqrt(\1)", s)
+
+    # Ensure explicit multiplication if Word gives: 5sqrt(63) or )sqrt(7)
+    s = re.sub(r"(\d)\s*sqrt\(", r"\1*sqrt(", s)
+    s = re.sub(r"\)\s*sqrt\(", r")*sqrt(", s)
 
     return s
 
@@ -471,5 +485,6 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
 
 
