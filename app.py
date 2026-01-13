@@ -55,9 +55,10 @@ def _normalize_word_text(s: str) -> str:
 
     return s
 
-def _parse_expr_friendly(s: str) -> sp.Expr:
+def _parse_expr_friendly(s: str, *, evaluate: bool = True) -> sp.Expr:
     s = _normalize_word_text(s)
-    return parse_expr(s, transformations=_TRANSFORMS, evaluate=True)
+    return parse_expr(s, transformations=_TRANSFORMS, evaluate=evaluate)
+
 
 
 # ============================================================
@@ -133,8 +134,8 @@ def _quadratic_solution_lines(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> Li
 def compute_problem_and_solution_lines(raw: str, var: str = "x") -> Tuple[str, Optional[List[str]]]:
     """
     Returns:
-      problem_latex: latex for the problem statement
-      solution_lines: list of latex lines for the worked solution (math-only), or None if parsing fails
+      problem_latex: LaTeX for the ORIGINAL problem (not pre-simplified)
+      solution_lines: list of LaTeX lines for the worked solution (math-only), or None if parsing fails
     """
     x = sp.Symbol(var)
     raw_norm = _normalize_word_text(raw)
@@ -142,14 +143,25 @@ def compute_problem_and_solution_lines(raw: str, var: str = "x") -> Tuple[str, O
     if not raw_norm:
         return r"\mathrm{(blank)}", None
 
+    # ---------------- Equation ----------------
     if "=" in raw_norm:
         left_s, right_s = raw_norm.split("=", 1)
+
+        # Parse for DISPLAY (do not simplify)
         try:
-            left = _parse_expr_friendly(left_s)
-            right = _parse_expr_friendly(right_s)
+            left_disp = _parse_expr_friendly(left_s, evaluate=False)
+            right_disp = _parse_expr_friendly(right_s, evaluate=False)
+            problem_ltx = sp.latex(sp.Eq(left_disp, right_disp, evaluate=False))
         except Exception:
-            # Still render the raw text as math
-            return raw_norm, None
+            # If display parsing fails, still show the raw text as math
+            problem_ltx = raw_norm
+
+        # Parse for SOLVING (can simplify)
+        try:
+            left = _parse_expr_friendly(left_s, evaluate=True)
+            right = _parse_expr_friendly(right_s, evaluate=True)
+        except Exception:
+            return problem_ltx, None
 
         expr = sp.simplify(left - right)
         try:
@@ -157,20 +169,26 @@ def compute_problem_and_solution_lines(raw: str, var: str = "x") -> Tuple[str, O
         except Exception:
             deg = 1
 
-        prob_ltx = sp.latex(sp.Eq(left, right))
         if deg == 2:
-            return prob_ltx, _quadratic_solution_lines(left, right, x)
+            return problem_ltx, _quadratic_solution_lines(left, right, x)
         else:
-            return prob_ltx, _linear_solution_lines(left, right, x)
+            return problem_ltx, _linear_solution_lines(left, right, x)
 
-    # Expression-only
+    # ---------------- Expression-only ----------------
+    # Display version (no simplify)
     try:
-        expr = _parse_expr_friendly(raw_norm)
-        simp = sp.simplify(expr)
-        return sp.latex(expr), [sp.latex(expr), sp.latex(simp), r"\therefore\ " + sp.latex(simp)]
+        expr_disp = _parse_expr_friendly(raw_norm, evaluate=False)
+        problem_ltx = sp.latex(expr_disp)
     except Exception:
-        return raw_norm, None
+        problem_ltx = raw_norm
 
+    # Solving/simplifying version
+    try:
+        expr = _parse_expr_friendly(raw_norm, evaluate=True)
+        simp = sp.simplify(expr)
+        return problem_ltx, [sp.latex(expr), sp.latex(simp), r"\therefore\ " + sp.latex(simp)]
+    except Exception:
+        return problem_ltx, None
 
 # ============================================================
 # 3) Render single-line LaTeX to PNG (mathtext-safe)
@@ -453,4 +471,5 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
 
