@@ -243,25 +243,30 @@ def _solve_system_lines(equations_raw: List[str]) -> Optional[Tuple[str, List[st
     if not syms:
         return None
 
-    # Problem latex: system
-    prob = r"\left\{\begin{array}{l}" + r"\\ ".join(sp.latex(e) for e in eqs) + r"\end{array}\right."
+    # --- Mathtext-safe "system" display (NO \begin{array}) ---
+    # Use a left brace + manual line breaks
+    # Example: \left\{\ x+y=5\\2x-y=1\right.
+    sys_lines = [sp.latex(e) for e in eqs]
+    prob = r"\left\{\ " + r"\\ ".join(sys_lines) + r"\right."
 
-    # Solve (covers 2x2, 3x3, nonlinear too)
+    # Solve
     sol = sp.solve(eqs, syms, dict=True)
-    lines: List[str] = [prob]
+    worked: List[str] = [prob]
 
-    # Show a compact solution line
     if not sol:
-        lines.append(r"\therefore\ \mathrm{no\ solution}")
-        return prob, lines[:5]
+        worked.append(r"\therefore\ \mathrm{no\ solution}")
+        return prob, worked[:5]
 
-    # pick first solution dict for display
     s0 = sol[0]
-    # Create (x,y,z) = (...)
-    tuple_lhs = r"\left(" + ",".join(sp.latex(v) for v in syms) + r"\right)"
-    tuple_rhs = r"\left(" + ",".join(sp.latex(sp.simplify(s0[v])) for v in syms) + r"\right)"
-    lines.append(r"\therefore\ " + tuple_lhs + "=" + tuple_rhs)
-    return prob, lines[:5]
+
+    # Build a clean final answer line:
+    # x=..., y=..., z=...
+    assigns = []
+    for v in syms:
+        assigns.append(sp.latex(v) + "=" + sp.latex(sp.simplify(s0[v])))
+
+    worked.append(r"\therefore\ " + r",\ ".join(assigns))
+    return prob, worked[:5]
 
 def _composition_prompt(raw: str) -> Optional[Tuple[str, List[str]]]:
     txt = (raw or "").strip()
@@ -667,5 +672,6 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
 
 
