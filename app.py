@@ -184,14 +184,41 @@ def _draw_math_centered_autofit(c: Canvas, math_latex: str, cx: float, cy: float
 # ============================================================
 
 def _split_equations(text: str) -> List[str]:
-    # split on newlines, semicolons, or "and" that separates equations
-    parts = re.split(r"[;\n]+|\band\b(?=.*=)", text, flags=re.IGNORECASE)
-    eqs = []
+    """
+    Extract equations from teacher prompts like:
+      "Solve system: x+y=5 and 2x-y=1"
+      "System: x+y+z=6; 2x-y+z=3; x-2y+3z=10"
+    """
+    if not text:
+        return []
+
+    t = text.strip()
+
+    # Remove common leading prompt phrases
+    t = re.sub(r"^\s*solve\s+(the\s+)?system\s*[:\-]?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"^\s*system\s*[:\-]?\s*", "", t, flags=re.IGNORECASE)
+
+    # Sometimes teachers put "Solve:" then "system:" etc.
+    t = re.sub(r"^\s*solve\s*[:\-]?\s*", "", t, flags=re.IGNORECASE)
+
+    # Split on newlines/semicolons, OR "and" (only when it separates equations that contain '=')
+    parts = re.split(r"[;\n]+|\band\b(?=.*=)", t, flags=re.IGNORECASE)
+
+    eqs: List[str] = []
     for p in parts:
         p = p.strip().rstrip(".")
+        if not p:
+            continue
+
+        # If something like "blah: x+y=5", keep only after the last colon
+        if ":" in p and "=" in p:
+            p = p.split(":")[-1].strip()
+
         if "=" in p:
             eqs.append(p)
+
     return eqs
+
 
 def _detect_vars(eqs: List[sp.Eq]) -> List[sp.Symbol]:
     vars_set = set()
@@ -608,3 +635,4 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
