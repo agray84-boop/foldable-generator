@@ -113,93 +113,135 @@ def _parse_expr_friendly(s: str, *, evaluate: bool = True) -> sp.Expr:
 # ============================================================
 # 2) Composition-of-functions prompt support (new)
 # ============================================================
-
 def _try_parse_composition_prompt(raw: str) -> Optional[Tuple[str, List[str]]]:
     """
-    Recognize prompts like:
-      "find f(g(x)), if g(x)=x+3 and f(x)=x^2+3"
-      "Find f∘g if g(x)=... and f(x)=..."
-      "Compute f(g(2)) if ..."
-    Returns (problem_latex, solution_lines) or None if no match.
+    Very forgiving parser for teacher-typed composition prompts.
+
+    Supports examples like:
+      - "Composition of functions: find f(g(x)), if g(x)=x+3 and f(x)=x^2+3"
+      - "Find f∘g if g(x)=x+3, f(x)=x^2+3"
+      - "Compute f(g(2)) if g(x)=2x-1 and f(x)=x^2+3"
+      - Extra words/punctuation are OK.
+
+    Returns (problem_latex, solution_lines) or None.
     """
     txt = (raw or "").strip()
     if not txt:
         return None
 
-    # Normalize some symbols
+    # Normalize common symbols/spacing
     txt_norm = txt.replace("∘", "o")
     txt_norm = re.sub(r"\s+", " ", txt_norm)
 
-    # Must mention f and g definitions
-    # Extract g(x)=... and f(x)=...
-    mg = re.search(r"g\s*\(\s*x\s*\)\s*=\s*([^,;]+)", txt_norm, flags=re.IGNORECASE)
-    mf = re.search(r"f\s*\(\s*x\s*\)\s*=\s*([^,;]+)", txt_norm, flags=re.IGNORECASE)
+    # Must contain both definitions somewhere
+    if not re.search(r"g\s*\(\s*x\s*\)\s*=", txt_norm, flags=re.IGNORECASE):
+        return None
+    if not re.search(r"f\s*\(\s*x\s*\)\s*=", txt_norm, flags=re.IGNORECASE):
+        return None
+
+    # Extract g(x)= ... up to ", f(" or " and f(" or end
+    mg = re.search(
+        r"g\s*\(\s*x\s*\)\s*=\s*(.+?)(?=(?:,|\band\b)\s*f\s*\(\s*x\s*\)\s*=|$)",
+        txt_norm,
+        flags=re.IGNORECASE
+    )
+    # Extract f(x)= ... up to ", g(" or " and g(" or end
+    mf = re.search(
+        r"f\s*\(\s*x\s*\)\s*=\s*(.+?)(?=(?:,|\band\b)\s*g\s*\(\s*x\s*\)\s*=|$)",
+        txt_norm,
+        flags=re.IGNORECASE
+    )
+
     if not (mg and mf):
         return None
 
-    g_rhs_raw = mg.group(1).strip()
-    f_rhs_raw = mf.group(1).strip()
+    g_rhs_raw = mg.group(1).strip().rstrip(".")
+    f_rhs_raw = mf.group(1).strip().rstrip(".")
 
-    # Determine target: f(g(x)) or g(f(x)) or numeric like f(g(2))
-    target = None
-    m_target = re.search(r"(f\s*\(\s*g\s*\(\s*x\s*\)\s*\)|g\s*\(\s*f\s*\(\s*x\s*\)\s*\))", txt_norm, flags=re.IGNORECASE)
-    if m_target:
-        target = re.sub(r"\s+", "", m_target.group(1)).lower()
-
-    # Numeric target: f(g(2)) etc
-    m_num = re.search(r"(f|g)\s*\(\s*(f|g)\s*\(\s*([\-]?\d+)\s*\)\s*\)", txt_norm, flags=re.IGNORECASE)
-    num_outer = num_inner = None
-    num_value = None
-    if m_num:
-        num_outer = m_num.group(1).lower()
-        num_inner = m_num.group(2).lower()
-        num_value = int(m_num.group(3))
-        target = f"{num_outer}({num_inner}({num_value}))"
-
-    # If not specified, default to f(g(x))
-    if target is None:
-        target = "f(g(x))"
-
-    # Parse functions for computation
     x = sp.Symbol("x")
+
+    # Parse for computation
     try:
         g_expr = _parse_expr_friendly(g_rhs_raw, evaluate=True)
         f_expr = _parse_expr_friendly(f_rhs_raw, evaluate=True)
     except Exception:
         return None
 
-    # Build solution
-    lines: List[str] = []
-
-    # Display versions (do not evaluate) for problem statement
+    # Parse for display (don’t simplify)
     try:
         g_disp = _parse_expr_friendly(g_rhs_raw, evaluate=False)
         f_disp = _parse_expr_friendly(f_rhs_raw, evaluate=False)
     except Exception:
         g_disp, f_disp = g_expr, f_expr
 
-    # Compose
-    if target.startswith("f(g(") and num_value is None:
-        composed = sp.simplify(f_expr.subs(x, g_expr))
-        problem_ltx = r"\mathrm{Find}\; f(g(x)) \;\mathrm{if}\; " + sp.latex(sp.Eq(sp.Function("g")(x), g_disp, evaluate=False)) \
-                      + r"\;\mathrm{and}\; " + sp.latex(sp.Eq(sp.Function("f")(x), f_disp, evaluate=False))
-        lines.append(r"f(g(x))")
-        lines.append(r"= " + sp.latex(f_expr.subs(x, sp.Symbol(r"g(x)"))))  # formal step
-        lines.append(r"= " + sp.latex(f_expr.subs(x, g_expr)))
-        lines.append(r"= " + sp.latex(composed))
-        lines.append(r"\therefore\ f(g(x))=" + sp.latex(composed))
-        return problem_ltx, lines[:5]
+    # Determine target:
+    # 1) explicit f(g(x)) or g(f(x))
+    target = None
+    if re.search(r"f\s*\(\s*g\s*\(\s*x\s*\)\s*\)", txt_norm, flags=re.IGNORECASE):
+        target = "f(g(x))"
+    elif re.search(r"g\s*\(\s*f\s*\(\s*x\s*\)\s*\)", txt_norm, flags=re.IGNORECASE):
+        target = "g(f(x))"
+    # 2) explicit f(g(2)) / g(f(2))
+    m_num = re.search(
+        r"(f|g)\s*\(\s*(f|g)\s*\(\s*([\-]?\d+)\s*\)\s*\)",
+        txt_norm,
+        flags=re.IGNORECASE
+    )
 
-    if target.startswith("g(f(") and num_value is None:
+    # Default
+    if target is None and not m_num:
+        target = "f(g(x))"
+
+    # Build the problem statement latex
+    prob_ltx = (
+        r"\mathrm{Find\ the\ composition.}\quad "
+        + sp.latex(sp.Eq(sp.Function("g")(x), g_disp, evaluate=False))
+        + r"\quad "
+        + sp.latex(sp.Eq(sp.Function("f")(x), f_disp, evaluate=False))
+    )
+
+    lines: List[str] = []
+
+    # Numeric composition
+    if m_num:
+        outer = m_num.group(1).lower()
+        inner = m_num.group(2).lower()
+        n = int(m_num.group(3))
+
+        inner_expr = g_expr if inner == "g" else f_expr
+        outer_expr = f_expr if outer == "f" else g_expr
+
+        inner_val = sp.simplify(inner_expr.subs(x, n))
+        outer_val = sp.simplify(outer_expr.subs(x, inner_val))
+
+        lines.append(f"{outer}({inner}({n}))")
+        lines.append(r"= " + ("f(" if outer == "f" else "g(") + sp.latex(inner_val) + r")")
+        lines.append(r"= " + sp.latex(outer_expr.subs(x, inner_val)))
+        lines.append(r"= " + sp.latex(outer_val))
+        lines.append(r"\therefore\ " + f"{outer}({inner}({n}))" + "=" + sp.latex(outer_val))
+        return prob_ltx, lines[:5]
+
+    # Symbolic compositions
+    if target == "g(f(x))":
         composed = sp.simplify(g_expr.subs(x, f_expr))
-        problem_ltx = r"\mathrm{Find}\; g(f(x)) \;\mathrm{if}\; " + sp.latex(sp.Eq(sp.Function("g")(x), g_disp, evaluate=False)) \
-                      + r"\;\mathrm{and}\; " + sp.latex(sp.Eq(sp.Function("f")(x), f_disp, evaluate=False))
         lines.append(r"g(f(x))")
-        lines.append(r"= " + sp.latex(g_expr.subs(x, sp.Symbol(r"f(x)"))))
+        lines.append(r"= " + sp.latex(g_expr.subs(x, sp.Symbol("f(x)"))))
         lines.append(r"= " + sp.latex(g_expr.subs(x, f_expr)))
         lines.append(r"= " + sp.latex(composed))
         lines.append(r"\therefore\ g(f(x))=" + sp.latex(composed))
-        return problem_ltx, lines[:5]
+        return prob_ltx, lines[:5]
+
+    # Default: f(g(x))
+    composed = sp.simplify(f_expr.subs(x, g_expr))
+    lines.append(r"f(g(x))")
+    lines.append(r"= " + sp.latex(f_expr.subs(x, sp.Symbol("g(x)"))))
+    lines.append(r"= " + sp.latex(f_expr.subs(x, g_expr)))
+    lines.append(r"= " + sp.latex(composed))
+    lines.append(r"\therefore\ f(g(x))=" + sp.latex(composed))
+    return prob_ltx, lines[:5]
+
+
+    
 
     # Numeric: f(g(n)) or g(f(n))
     if num_value is not None and num_outer and num_inner:
@@ -687,3 +729,4 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
