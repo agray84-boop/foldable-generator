@@ -331,12 +331,42 @@ def _composition_prompt(raw: str) -> Optional[Tuple[str, List[str]]]:
     return prob, lines[:5]
 
 def _simplify_lines(expr_raw: str) -> Tuple[str, List[str]]:
-    # display preserved
-    disp = _parse_expr(expr_raw, evaluate=False)
-    prob = sp.latex(disp)
+    """
+    Simplify an expression from a teacher prompt.
+    Fixes SymPy boolean parsing issues caused by words like 'or' and 'and'.
+    """
+    s = (expr_raw or "").strip()
 
-    expr = _parse_expr(expr_raw, evaluate=True)
-    # stronger simplify for Algebra II style
+    # If teacher wrote something like "Simplify: <math>", keep only after the last colon
+    if ":" in s:
+        s = s.split(":")[-1].strip()
+
+    # Remove common instruction words (keep variables like x, y, z intact)
+    s = re.sub(r"\b(simplify|simplified|reduce|compute|evaluate|find|expression)\b", "", s, flags=re.IGNORECASE)
+
+    # Remove boolean words that SymPy interprets as logic operators
+    s = re.sub(r"\b(or|and|not)\b", "", s, flags=re.IGNORECASE)
+
+    # Clean extra punctuation/spacing
+    s = s.replace(",", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # DISPLAY parse (preserve structure) — if it fails, just print the cleaned raw
+    try:
+        disp = _parse_expr(s, evaluate=False)
+        prob = sp.latex(disp)
+    except Exception:
+        prob = _normalize_word_text(s) if s else r"\mathrm{(blank)}"
+        return prob, [prob]
+
+    # COMPUTE parse
+    try:
+        expr = _parse_expr(s, evaluate=True)
+    except Exception:
+        # Print what we could, but avoid crashing
+        return prob, [prob]
+
+    # Stronger Algebra II simplification pipeline
     s1 = sp.together(expr)
     s2 = sp.radsimp(s1)
     s3 = sp.simplify(s2)
@@ -349,7 +379,9 @@ def _simplify_lines(expr_raw: str) -> Tuple[str, List[str]]:
     if s3 != s2:
         lines.append(sp.latex(s3))
     lines.append(r"\therefore\ " + sp.latex(s3))
+
     return prob, lines[:5]
+
 
 def _solve_equation_lines(eq_raw: str) -> Tuple[str, List[str]]:
     left_s, right_s = eq_raw.split("=", 1)
@@ -635,4 +667,5 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
 
