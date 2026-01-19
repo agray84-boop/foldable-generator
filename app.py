@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import re
 import tempfile
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import sympy as sp
 from sympy.parsing.sympy_parser import (
@@ -23,61 +23,51 @@ import matplotlib.pyplot as plt
 
 
 # ============================================================
-# 1) Parsing utilities (Word-friendly + better radicals/fractions)
+# 0) SymPy setup
 # ============================================================
 
 _TRANSFORMS = standard_transformations + (
-    implicit_multiplication_application,  # 2x -> 2*x, (x+1)(x-2) -> *
-    convert_xor,                          # x^2 supported
+    implicit_multiplication_application,
+    convert_xor,  # allow ^
 )
 
-# Unicode fraction map (Word sometimes pastes these)
 _UFRAC = {
-    "½": "(1/2)",
-    "⅓": "(1/3)",
-    "⅔": "(2/3)",
-    "¼": "(1/4)",
-    "¾": "(3/4)",
-    "⅕": "(1/5)",
-    "⅖": "(2/5)",
-    "⅗": "(3/5)",
-    "⅘": "(4/5)",
-    "⅙": "(1/6)",
-    "⅚": "(5/6)",
-    "⅛": "(1/8)",
-    "⅜": "(3/8)",
-    "⅝": "(5/8)",
-    "⅞": "(7/8)",
+    "½": "(1/2)", "⅓": "(1/3)", "⅔": "(2/3)", "¼": "(1/4)", "¾": "(3/4)",
+    "⅕": "(1/5)", "⅖": "(2/5)", "⅗": "(3/5)", "⅘": "(4/5)",
+    "⅙": "(1/6)", "⅚": "(5/6)", "⅛": "(1/8)", "⅜": "(3/8)", "⅝": "(5/8)", "⅞": "(7/8)",
 }
+
+
+# ============================================================
+# 1) Input normalization (Word-friendly + radicals + nth roots + i)
+# ============================================================
 
 def _normalize_word_text(s: str) -> str:
     """
-    Normalize what teachers paste from Word.
+    Normalize what teachers paste/type.
     Supports:
-      - unicode minus and multiplication symbols
-      - unicode fractions (½ etc)
-      - mixed numbers: "1 1/2" -> "(1+1/2)"
-      - classroom shorthand: 1/2x -> (1/2)*x
-      - radicals: √63, √(x+1) -> sqrt(63), sqrt(x+1)
-      - unicode superscripts: x⁶ -> x^6
+      - unicode minus/multiply, unicode fractions
+      - mixed numbers: "3 1/2" -> (3+(1/2))
+      - radicals: √, ∛, ∜
+      - sqrt(x), root(x, n) forms
+      - converts i to I in contexts that look like imaginary numbers (3i, +i, -i)
+      - keeps teacher structure for display when evaluate=False
     """
     s = (s or "").strip()
     if not s:
         return s
 
-    # Normalize symbols
     s = s.replace("−", "-").replace("·", "*").replace("×", "*")
     s = re.sub(r"\s+", " ", s).strip()
 
-    # Unicode fractions like ½
+    # Unicode fractions
     for k, v in _UFRAC.items():
         s = s.replace(k, v)
 
-    # Mixed numbers like "3 1/2" -> "(3+1/2)"
-    # (Only when there's a space between whole and fraction)
+    # Mixed numbers "3 1/2"
     s = re.sub(r"\b(\d+)\s+(\d+)\s*/\s*(\d+)\b", r"(\1+(\2/\3))", s)
 
-    # Unicode superscripts: x⁶ -> x^6
+    # Unicode superscripts digits -> ^digits for common cases (x⁶)
     sup_map = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
     s = re.sub(
         r"([A-Za-z])([⁰¹²³⁴⁵⁶⁷⁸⁹]+)",
@@ -85,323 +75,43 @@ def _normalize_word_text(s: str) -> str:
         s
     )
 
-    # Classroom shorthand: 1/2x means (1/2)*x (NOT 1/(2x))
+    # Classroom shorthand: 1/2x => (1/2)*x
     s = re.sub(r'(\d+)\s*/\s*(\d+)\s*([A-Za-z])', r'(\1/\2)*\3', s)
 
-    # RADICAL SUPPORT:
-    # √(something) -> sqrt(something)
+    # Radicals:
+    # √( ... ) -> sqrt(...)
     s = re.sub(r"√\s*\(([^)]+)\)", r"sqrt(\1)", s)
-    # √63, √x -> sqrt(63), sqrt(x)
+    # √63 or √x -> sqrt(63), sqrt(x)
     s = re.sub(r"√\s*([A-Za-z0-9]+)", r"sqrt(\1)", s)
-    # Ensure explicit multiplication: 5sqrt(63) -> 5*sqrt(63), )sqrt( -> )*sqrt(
-    s = re.sub(r"(\d)\s*sqrt\(", r"\1*sqrt(", s)
-    s = re.sub(r"\)\s*sqrt\(", r")*sqrt(", s)
+
+    # Cube root and fourth root unicode: ∛x, ∜x, and versions with parentheses
+    s = re.sub(r"∛\s*\(([^)]+)\)", r"root(\1,3)", s)
+    s = re.sub(r"∛\s*([A-Za-z0-9]+)", r"root(\1,3)", s)
+    s = re.sub(r"∜\s*\(([^)]+)\)", r"root(\1,4)", s)
+    s = re.sub(r"∜\s*([A-Za-z0-9]+)", r"root(\1,4)", s)
+
+    # Ensure explicit multiplication with sqrt/root when needed
+    s = re.sub(r"(\d)\s*(sqrt|root)\(", r"\1*\2(", s)
+    s = re.sub(r"\)\s*(sqrt|root)\(", r")*\1(", s)
+
+    # Imaginary i -> I (only when it looks like imaginary usage)
+    # Examples: 3i, -i, + i, (2+i)
+    s = re.sub(r"(\d)\s*i\b", r"\1*I", s)
+    s = re.sub(r"([\+\-\(])\s*i\b", r"\1 I", s)
+    s = re.sub(r"\bi\b", lambda m: "I" if re.search(r"sqrt\(\s*-\d", s) else m.group(0), s)
 
     return s
 
 
-def _parse_expr_friendly(s: str, *, evaluate: bool = True) -> sp.Expr:
-    """
-    Parse expression with Word-normalization.
-    Use evaluate=False for DISPLAY (preserve structure),
-    and evaluate=True for COMPUTATION (simplify/solve).
-    """
+def _parse_expr(s: str, *, evaluate: bool = True) -> sp.Expr:
     s = _normalize_word_text(s)
-    return parse_expr(s, transformations=_TRANSFORMS, evaluate=evaluate)
+    # allow root() in parsing namespace
+    local_dict = {"root": sp.root, "sqrt": sp.sqrt, "I": sp.I}
+    return parse_expr(s, transformations=_TRANSFORMS, evaluate=evaluate, local_dict=local_dict)
 
 
 # ============================================================
-# 2) Composition-of-functions prompt support (new)
-# ============================================================
-def _try_parse_composition_prompt(raw: str) -> Optional[Tuple[str, List[str]]]:
-    """
-    Very forgiving parser for teacher-typed composition prompts.
-
-    Supports examples like:
-      - "Composition of functions: find f(g(x)), if g(x)=x+3 and f(x)=x^2+3"
-      - "Find f∘g if g(x)=x+3, f(x)=x^2+3"
-      - "Compute f(g(2)) if g(x)=2x-1 and f(x)=x^2+3"
-      - Extra words/punctuation are OK.
-
-    Returns (problem_latex, solution_lines) or None.
-    """
-    txt = (raw or "").strip()
-    if not txt:
-        return None
-
-    # Normalize common symbols/spacing
-    txt_norm = txt.replace("∘", "o")
-    txt_norm = re.sub(r"\s+", " ", txt_norm)
-
-    # Must contain both definitions somewhere
-    if not re.search(r"g\s*\(\s*x\s*\)\s*=", txt_norm, flags=re.IGNORECASE):
-        return None
-    if not re.search(r"f\s*\(\s*x\s*\)\s*=", txt_norm, flags=re.IGNORECASE):
-        return None
-
-    # Extract g(x)= ... up to ", f(" or " and f(" or end
-    mg = re.search(
-        r"g\s*\(\s*x\s*\)\s*=\s*(.+?)(?=(?:,|\band\b)\s*f\s*\(\s*x\s*\)\s*=|$)",
-        txt_norm,
-        flags=re.IGNORECASE
-    )
-    # Extract f(x)= ... up to ", g(" or " and g(" or end
-    mf = re.search(
-        r"f\s*\(\s*x\s*\)\s*=\s*(.+?)(?=(?:,|\band\b)\s*g\s*\(\s*x\s*\)\s*=|$)",
-        txt_norm,
-        flags=re.IGNORECASE
-    )
-
-    if not (mg and mf):
-        return None
-
-    g_rhs_raw = mg.group(1).strip().rstrip(".")
-    f_rhs_raw = mf.group(1).strip().rstrip(".")
-
-    x = sp.Symbol("x")
-
-    # Parse for computation
-    try:
-        g_expr = _parse_expr_friendly(g_rhs_raw, evaluate=True)
-        f_expr = _parse_expr_friendly(f_rhs_raw, evaluate=True)
-    except Exception:
-        return None
-
-    # Parse for display (don’t simplify)
-    try:
-        g_disp = _parse_expr_friendly(g_rhs_raw, evaluate=False)
-        f_disp = _parse_expr_friendly(f_rhs_raw, evaluate=False)
-    except Exception:
-        g_disp, f_disp = g_expr, f_expr
-
-    # Determine target:
-    # 1) explicit f(g(x)) or g(f(x))
-    target = None
-    if re.search(r"f\s*\(\s*g\s*\(\s*x\s*\)\s*\)", txt_norm, flags=re.IGNORECASE):
-        target = "f(g(x))"
-    elif re.search(r"g\s*\(\s*f\s*\(\s*x\s*\)\s*\)", txt_norm, flags=re.IGNORECASE):
-        target = "g(f(x))"
-    # 2) explicit f(g(2)) / g(f(2))
-    m_num = re.search(
-        r"(f|g)\s*\(\s*(f|g)\s*\(\s*([\-]?\d+)\s*\)\s*\)",
-        txt_norm,
-        flags=re.IGNORECASE
-    )
-
-    # Default
-    if target is None and not m_num:
-        target = "f(g(x))"
-
-    # Build the problem statement latex
-    prob_ltx = (
-        r"\mathrm{Find\ the\ composition.}\quad "
-        + sp.latex(sp.Eq(sp.Function("g")(x), g_disp, evaluate=False))
-        + r"\quad "
-        + sp.latex(sp.Eq(sp.Function("f")(x), f_disp, evaluate=False))
-    )
-
-    lines: List[str] = []
-
-    # Numeric composition
-    if m_num:
-        outer = m_num.group(1).lower()
-        inner = m_num.group(2).lower()
-        n = int(m_num.group(3))
-
-        inner_expr = g_expr if inner == "g" else f_expr
-        outer_expr = f_expr if outer == "f" else g_expr
-
-        inner_val = sp.simplify(inner_expr.subs(x, n))
-        outer_val = sp.simplify(outer_expr.subs(x, inner_val))
-
-        lines.append(f"{outer}({inner}({n}))")
-        lines.append(r"= " + ("f(" if outer == "f" else "g(") + sp.latex(inner_val) + r")")
-        lines.append(r"= " + sp.latex(outer_expr.subs(x, inner_val)))
-        lines.append(r"= " + sp.latex(outer_val))
-        lines.append(r"\therefore\ " + f"{outer}({inner}({n}))" + "=" + sp.latex(outer_val))
-        return prob_ltx, lines[:5]
-
-    # Symbolic compositions
-    if target == "g(f(x))":
-        composed = sp.simplify(g_expr.subs(x, f_expr))
-        lines.append(r"g(f(x))")
-        lines.append(r"= " + sp.latex(g_expr.subs(x, sp.Symbol("f(x)"))))
-        lines.append(r"= " + sp.latex(g_expr.subs(x, f_expr)))
-        lines.append(r"= " + sp.latex(composed))
-        lines.append(r"\therefore\ g(f(x))=" + sp.latex(composed))
-        return prob_ltx, lines[:5]
-
-    # Default: f(g(x))
-    composed = sp.simplify(f_expr.subs(x, g_expr))
-    lines.append(r"f(g(x))")
-    lines.append(r"= " + sp.latex(f_expr.subs(x, sp.Symbol("g(x)"))))
-    lines.append(r"= " + sp.latex(f_expr.subs(x, g_expr)))
-    lines.append(r"= " + sp.latex(composed))
-    lines.append(r"\therefore\ f(g(x))=" + sp.latex(composed))
-    return prob_ltx, lines[:5]
-
-
-    
-
-    # Numeric: f(g(n)) or g(f(n))
-    if num_value is not None and num_outer and num_inner:
-        inner_expr = g_expr if num_inner == "g" else f_expr
-        outer_expr = f_expr if num_outer == "f" else g_expr
-
-        inner_val = sp.simplify(inner_expr.subs(x, num_value))
-        outer_val = sp.simplify(outer_expr.subs(x, inner_val))
-
-        problem_ltx = r"\mathrm{Find}\; " + re.sub(r"\s+", "", target) + r"\;\mathrm{if}\; " \
-                      + sp.latex(sp.Eq(sp.Function("g")(x), g_disp, evaluate=False)) \
-                      + r"\;\mathrm{and}\; " + sp.latex(sp.Eq(sp.Function("f")(x), f_disp, evaluate=False))
-
-        lines.append(re.sub(r"\s+", "", target))
-        lines.append(r"= " + (r"f(" if num_outer == "f" else r"g(") + sp.latex(inner_val) + r")")
-        lines.append(r"= " + sp.latex(outer_expr.subs(x, inner_val)))
-        lines.append(r"= " + sp.latex(outer_val))
-        lines.append(r"\therefore\ " + re.sub(r"\s+", "", target) + "=" + sp.latex(outer_val))
-        return problem_ltx, lines[:5]
-
-    return None
-
-
-# ============================================================
-# 3) Step generation (math-only lines, no labels, no boxes)
-# ============================================================
-
-def _linear_solution_lines(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
-    expr = sp.simplify(left - right)
-    poly = sp.Poly(expr, x)
-    a = poly.coeff_monomial(x)
-    b = poly.coeff_monomial(1)
-
-    lines: List[str] = []
-    lines.append(sp.latex(sp.Eq(left, right)))
-    lines.append(sp.latex(sp.Eq(expr, 0)))
-    lines.append(sp.latex(sp.Eq(a * x, -b)))
-
-    if a == 0:
-        lines.append(r"\therefore\ \mathrm{no\ unique\ solution}")
-        return lines[:5]
-
-    sol = sp.simplify(-b / a)
-    lines.append(sp.latex(sp.Eq(x, sol)))
-    lines.append(r"\therefore\ x=" + sp.latex(sol))
-    return lines[:5]
-
-def _quadratic_solution_lines(left: sp.Expr, right: sp.Expr, x: sp.Symbol) -> List[str]:
-    expr = sp.simplify(left - right)
-    lines: List[str] = []
-    lines.append(sp.latex(sp.Eq(left, right)))
-    lines.append(sp.latex(sp.Eq(expr, 0)))
-
-    factored = sp.factor(expr)
-    if factored != expr:
-        lines.append(sp.latex(sp.Eq(factored, 0)))
-        sols = sp.solve(sp.Eq(expr, 0), x)
-        sols = [sp.simplify(s) for s in sols]
-        if len(sols) == 1:
-            lines.append(r"\therefore\ x=" + sp.latex(sols[0]))
-        elif len(sols) >= 2:
-            lines.append(r"\therefore\ x=" + sp.latex(sols[0]) + r",\ x=" + sp.latex(sols[1]))
-        else:
-            lines.append(r"\therefore\ \mathrm{no\ real\ solutions}")
-        return lines[:5]
-
-    # Quadratic formula (compact)
-    poly = sp.Poly(expr, x)
-    a = poly.coeff_monomial(x**2)
-    b = poly.coeff_monomial(x)
-    c = poly.coeff_monomial(1)
-    disc = sp.simplify(b**2 - 4*a*c)
-
-    lines.append(r"x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}")
-    lines.append(r"x=\frac{" + sp.latex(-b) + r"\pm\sqrt{" + sp.latex(disc) + r"}}{" + sp.latex(2*a) + r"}")
-
-    sols = sp.solve(sp.Eq(expr, 0), x)
-    sols = [sp.simplify(s) for s in sols]
-    if len(sols) == 1:
-        lines.append(r"\therefore\ x=" + sp.latex(sols[0]))
-    elif len(sols) >= 2:
-        lines.append(r"\therefore\ x=" + sp.latex(sols[0]) + r",\ x=" + sp.latex(sols[1]))
-    else:
-        lines.append(r"\therefore\ \mathrm{no\ real\ solutions}")
-
-    return lines[:5]
-
-def _simplify_expression_lines(expr: sp.Expr) -> List[str]:
-    simp = sp.simplify(expr)
-    # Try stronger simplification for radicals/rationals
-    simp2 = sp.simplify(sp.together(sp.radsimp(simp)))
-    if simp2 != simp:
-        return [sp.latex(expr), sp.latex(simp), sp.latex(simp2), r"\therefore\ " + sp.latex(simp2)][:5]
-    return [sp.latex(expr), sp.latex(simp), r"\therefore\ " + sp.latex(simp)][:5]
-
-
-def compute_problem_and_solution_lines(raw: str, var: str = "x") -> Tuple[str, Optional[List[str]]]:
-    """
-    Returns:
-      problem_latex: LaTeX for the ORIGINAL problem (not pre-simplified)
-      solution_lines: list of LaTeX lines (math-only), or None if parsing fails
-    """
-    raw = (raw or "").strip()
-    if not raw:
-        return r"\mathrm{(blank)}", None
-
-    # 1) Try advanced composition prompt
-    comp = _try_parse_composition_prompt(raw)
-    if comp:
-        return comp
-
-    x = sp.Symbol(var)
-    raw_norm = _normalize_word_text(raw)
-
-    # Equation
-    if "=" in raw_norm:
-        left_s, right_s = raw_norm.split("=", 1)
-
-        # DISPLAY parse (preserve structure)
-        try:
-            left_disp = _parse_expr_friendly(left_s, evaluate=False)
-            right_disp = _parse_expr_friendly(right_s, evaluate=False)
-            problem_ltx = sp.latex(sp.Eq(left_disp, right_disp, evaluate=False))
-        except Exception:
-            problem_ltx = raw_norm
-
-        # COMPUTE parse
-        try:
-            left = _parse_expr_friendly(left_s, evaluate=True)
-            right = _parse_expr_friendly(right_s, evaluate=True)
-        except Exception:
-            return problem_ltx, None
-
-        expr = sp.simplify(left - right)
-        try:
-            deg = sp.Poly(expr, x).degree()
-        except Exception:
-            deg = 1
-
-        if deg == 2:
-            return problem_ltx, _quadratic_solution_lines(left, right, x)
-        else:
-            return problem_ltx, _linear_solution_lines(left, right, x)
-
-    # Expression-only
-    try:
-        expr_disp = _parse_expr_friendly(raw_norm, evaluate=False)
-        problem_ltx = sp.latex(expr_disp)
-    except Exception:
-        problem_ltx = raw_norm
-
-    try:
-        expr = _parse_expr_friendly(raw_norm, evaluate=True)
-        return problem_ltx, _simplify_expression_lines(expr)
-    except Exception:
-        return problem_ltx, None
-
-
-# ============================================================
-# 4) Rendering (auto-fit)
+# 2) Rendering (mathtext-safe) + auto-fit
 # ============================================================
 
 def _clean_for_mathtext(latex: str) -> str:
@@ -410,7 +120,6 @@ def _clean_for_mathtext(latex: str) -> str:
         s = s[1:-1].strip()
     s = s.replace(r"\displaystyle", "")
     s = s.replace(r"\left", "").replace(r"\right", "")
-    # Avoid unsupported macros
     s = re.sub(r"\\boxed\{(.*?)\}", r"\1", s)
     return s.strip()
 
@@ -440,15 +149,8 @@ def _render_math_png(math_latex: str, font_size: int = 16, dpi: int = 300) -> st
 
 def _draw_math_centered_autofit(c: Canvas, math_latex: str, cx: float, cy: float, w: float, h: float,
                                start_font: int = 16, min_font: int = 11):
-    """
-    Auto-fit: if the rendered expression is too big (scale too small),
-    rerender with a smaller font until it fits nicely.
-    """
-    target_min_scale = 0.85  # higher = prefer larger readable text
-    best_path = None
-    best_img = None
-    best_scale = None
-    best_w = best_h = None
+    target_min_scale = 0.85
+    best = None  # (path, img, scale, iw, ih)
 
     for fs in range(start_font, min_font - 1, -1):
         path = _render_math_png(math_latex, font_size=fs)
@@ -456,68 +158,258 @@ def _draw_math_centered_autofit(c: Canvas, math_latex: str, cx: float, cy: float
         iw, ih = img.getSize()
         scale = min(w / iw, h / ih, 1.0)
 
-        # keep best so far
-        if best_scale is None or scale > best_scale:
-            # clean up previous best file
-            if best_path and os.path.exists(best_path):
-                try:
-                    os.remove(best_path)
-                except OSError:
-                    pass
-            best_path, best_img, best_scale = path, img, scale
-            best_w, best_h = iw, ih
+        if best is None or scale > best[2]:
+            if best and os.path.exists(best[0]):
+                try: os.remove(best[0])
+                except OSError: pass
+            best = (path, img, scale, iw, ih)
         else:
-            # not best
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+            try: os.remove(path)
+            except OSError: pass
 
         if scale >= target_min_scale:
             break
 
-    # draw best
-    dw, dh = best_w * best_scale, best_h * best_scale
-    c.drawImage(best_img, cx - dw/2, cy - dh/2, dw, dh, mask="auto")
+    path, img, scale, iw, ih = best
+    dw, dh = iw * scale, ih * scale
+    c.drawImage(img, cx - dw/2, cy - dh/2, dw, dh, mask="auto")
 
-    # cleanup
-    if best_path and os.path.exists(best_path):
-        try:
-            os.remove(best_path)
-        except OSError:
-            pass
+    if path and os.path.exists(path):
+        try: os.remove(path)
+        except OSError: pass
 
 
 # ============================================================
-# 5) PDF layout: HORIZONTAL bands + optional teacher instructions
+# 3) Advanced prompt router (Algebra I/II)
+# ============================================================
+
+def _split_equations(text: str) -> List[str]:
+    # split on newlines, semicolons, or "and" that separates equations
+    parts = re.split(r"[;\n]+|\band\b(?=.*=)", text, flags=re.IGNORECASE)
+    eqs = []
+    for p in parts:
+        p = p.strip().rstrip(".")
+        if "=" in p:
+            eqs.append(p)
+    return eqs
+
+def _detect_vars(eqs: List[sp.Eq]) -> List[sp.Symbol]:
+    vars_set = set()
+    for e in eqs:
+        vars_set |= e.free_symbols
+    # common ordering preference
+    order = ["x", "y", "z", "a", "b", "c"]
+    syms = list(vars_set)
+    syms.sort(key=lambda s: (order.index(str(s)) if str(s) in order else 999, str(s)))
+    return syms[:3]  # Algebra II scope: up to 3 vars
+
+def _solve_system_lines(equations_raw: List[str]) -> Optional[Tuple[str, List[str]]]:
+    # parse equations
+    eqs: List[sp.Eq] = []
+    for er in equations_raw:
+        left_s, right_s = er.split("=", 1)
+        left = _parse_expr(left_s, evaluate=True)
+        right = _parse_expr(right_s, evaluate=True)
+        eqs.append(sp.Eq(left, right))
+
+    syms = _detect_vars(eqs)
+    if not syms:
+        return None
+
+    # Problem latex: system
+    prob = r"\left\{\begin{array}{l}" + r"\\ ".join(sp.latex(e) for e in eqs) + r"\end{array}\right."
+
+    # Solve (covers 2x2, 3x3, nonlinear too)
+    sol = sp.solve(eqs, syms, dict=True)
+    lines: List[str] = [prob]
+
+    # Show a compact solution line
+    if not sol:
+        lines.append(r"\therefore\ \mathrm{no\ solution}")
+        return prob, lines[:5]
+
+    # pick first solution dict for display
+    s0 = sol[0]
+    # Create (x,y,z) = (...)
+    tuple_lhs = r"\left(" + ",".join(sp.latex(v) for v in syms) + r"\right)"
+    tuple_rhs = r"\left(" + ",".join(sp.latex(sp.simplify(s0[v])) for v in syms) + r"\right)"
+    lines.append(r"\therefore\ " + tuple_lhs + "=" + tuple_rhs)
+    return prob, lines[:5]
+
+def _composition_prompt(raw: str) -> Optional[Tuple[str, List[str]]]:
+    txt = (raw or "").strip()
+    if not txt:
+        return None
+    t = txt.replace("∘", "o")
+    t = re.sub(r"\s+", " ", t)
+
+    mg = re.search(r"g\s*\(\s*x\s*\)\s*=\s*(.+?)(?=(?:,|\band\b)\s*f\s*\(\s*x\s*\)\s*=|$)", t, flags=re.IGNORECASE)
+    mf = re.search(r"f\s*\(\s*x\s*\)\s*=\s*(.+?)(?=(?:,|\band\b)\s*g\s*\(\s*x\s*\)\s*=|$)", t, flags=re.IGNORECASE)
+    if not (mg and mf):
+        return None
+
+    g_raw = mg.group(1).strip().rstrip(".")
+    f_raw = mf.group(1).strip().rstrip(".")
+    x = sp.Symbol("x")
+
+    # determine target
+    target = "f(g(x))"
+    if re.search(r"g\s*\(\s*f\s*\(\s*x\s*\)\s*\)", t, flags=re.IGNORECASE):
+        target = "g(f(x))"
+    mnum = re.search(r"(f|g)\s*\(\s*(f|g)\s*\(\s*([\-]?\d+)\s*\)\s*\)", t, flags=re.IGNORECASE)
+
+    try:
+        g = _parse_expr(g_raw, evaluate=True)
+        f = _parse_expr(f_raw, evaluate=True)
+        g_disp = _parse_expr(g_raw, evaluate=False)
+        f_disp = _parse_expr(f_raw, evaluate=False)
+    except Exception:
+        return None
+
+    prob = (r"\mathrm{Compose:}\ "
+            + sp.latex(sp.Eq(sp.Function("g")(x), g_disp, evaluate=False))
+            + r"\ ,\ "
+            + sp.latex(sp.Eq(sp.Function("f")(x), f_disp, evaluate=False)))
+
+    lines: List[str] = [prob]
+
+    if mnum:
+        outer = mnum.group(1).lower()
+        inner = mnum.group(2).lower()
+        n = int(mnum.group(3))
+        inner_expr = g if inner == "g" else f
+        outer_expr = f if outer == "f" else g
+        inner_val = sp.simplify(inner_expr.subs(x, n))
+        outer_val = sp.simplify(outer_expr.subs(x, inner_val))
+
+        lines.append(f"{outer}({inner}({n}))")
+        lines.append(r"= " + ("f(" if outer == "f" else "g(") + sp.latex(inner_val) + r")")
+        lines.append(r"= " + sp.latex(outer_val))
+        lines.append(r"\therefore\ " + f"{outer}({inner}({n}))=" + sp.latex(outer_val))
+        return prob, lines[:5]
+
+    if target == "g(f(x))":
+        comp = sp.simplify(g.subs(x, f))
+        lines.append(r"g(f(x))")
+        lines.append(r"= " + sp.latex(g.subs(x, f)))
+        lines.append(r"= " + sp.latex(comp))
+        lines.append(r"\therefore\ g(f(x))=" + sp.latex(comp))
+        return prob, lines[:5]
+
+    comp = sp.simplify(f.subs(x, g))
+    lines.append(r"f(g(x))")
+    lines.append(r"= " + sp.latex(f.subs(x, g)))
+    lines.append(r"= " + sp.latex(comp))
+    lines.append(r"\therefore\ f(g(x))=" + sp.latex(comp))
+    return prob, lines[:5]
+
+def _simplify_lines(expr_raw: str) -> Tuple[str, List[str]]:
+    # display preserved
+    disp = _parse_expr(expr_raw, evaluate=False)
+    prob = sp.latex(disp)
+
+    expr = _parse_expr(expr_raw, evaluate=True)
+    # stronger simplify for Algebra II style
+    s1 = sp.together(expr)
+    s2 = sp.radsimp(s1)
+    s3 = sp.simplify(s2)
+
+    lines = [prob]
+    if s1 != expr:
+        lines.append(sp.latex(s1))
+    if s2 != s1:
+        lines.append(sp.latex(s2))
+    if s3 != s2:
+        lines.append(sp.latex(s3))
+    lines.append(r"\therefore\ " + sp.latex(s3))
+    return prob, lines[:5]
+
+def _solve_equation_lines(eq_raw: str) -> Tuple[str, List[str]]:
+    left_s, right_s = eq_raw.split("=", 1)
+
+    # display
+    left_disp = _parse_expr(left_s, evaluate=False)
+    right_disp = _parse_expr(right_s, evaluate=False)
+    prob = sp.latex(sp.Eq(left_disp, right_disp, evaluate=False))
+
+    left = _parse_expr(left_s, evaluate=True)
+    right = _parse_expr(right_s, evaluate=True)
+    x = sp.Symbol("x")
+    eq = sp.Eq(left, right)
+
+    # solve (handles complex solutions too)
+    sols = sp.solve(eq, x)
+
+    lines = [prob, sp.latex(sp.Eq(sp.simplify(left - right), 0))]
+    if len(sols) == 0:
+        lines.append(r"\therefore\ \mathrm{no\ solution}")
+        return prob, lines[:5]
+    if len(sols) == 1:
+        lines.append(r"\therefore\ x=" + sp.latex(sp.simplify(sols[0])))
+        return prob, lines[:5]
+    # multiple
+    lines.append(r"\therefore\ x=" + sp.latex(sp.simplify(sols[0])) + r",\ x=" + sp.latex(sp.simplify(sols[1])))
+    return prob, lines[:5]
+
+def solve_or_simplify_advanced_prompt(raw: str) -> Optional[Tuple[str, List[str]]]:
+    """
+    Master router:
+      - composition prompts
+      - systems (2x2, 3x3, up to 3 vars)
+      - solve equation
+      - simplify expression
+    """
+    t = (raw or "").strip()
+    if not t:
+        return None
+
+    # composition
+    comp = _composition_prompt(t)
+    if comp:
+        return comp
+
+    # system detection: multiple equations
+    eqs_raw = _split_equations(t)
+    if len(eqs_raw) >= 2:
+        sys = _solve_system_lines(eqs_raw[:3])  # keep 3 equations max for 3x3
+        if sys:
+            return sys
+
+    # single equation solve prompts
+    if "=" in t and re.search(r"\bsolve\b|\bfind\b|\bsolution\b", t, flags=re.IGNORECASE):
+        # try to extract the first equation-looking substring
+        m = re.search(r"([A-Za-z0-9\(\)\+\-\*/\^\s√∛∜\.,]+=[A-Za-z0-9\(\)\+\-\*/\^\s√∛∜\.,]+)", t)
+        eq_raw = m.group(1) if m else t
+        return _solve_equation_lines(eq_raw.strip().rstrip("."))
+
+    # simplify prompts
+    if re.search(r"\bsimplify\b|\breduce\b|\bsimplified\b", t, flags=re.IGNORECASE):
+        # remove leading words like "simplify:"
+        expr_raw = re.sub(r"^\s*(simplify|reduce)\s*[:\-]?\s*", "", t, flags=re.IGNORECASE).strip()
+        return _simplify_lines(expr_raw)
+
+    # fallback: if it's a bare equation, solve; else simplify
+    if "=" in t:
+        # if they just paste "x^2+1=0" without the word solve, still solve it
+        return _solve_equation_lines(t.strip().rstrip("."))
+    else:
+        return _simplify_lines(t.strip().rstrip("."))
+
+
+# ============================================================
+# 4) Foldable PDF (horizontal bands + optional teacher instruction)
 # ============================================================
 
 def build_foldable_pdf(out_path: str,
-                       eq1_ltx: str, eq1_lines: Optional[List[str]], instr1: str,
-                       eq2_ltx: str, eq2_lines: Optional[List[str]], instr2: str,
-                       eq3_ltx: str, eq3_lines: Optional[List[str]], instr3: str):
-    """
-    Horizontal fold lines at 2.75", 5.5", 8.25" from the TOP.
-
-    FRONT (top to bottom bands):
-      Band 1: #2 problem only + fold-center note + optional instruction
-      Band 2: #3 worked + optional instruction
-      Band 3: Open First
-      Band 4: #1 problem only + optional instruction
-
-    BACK (rotated 180 degrees):
-      Band 1: #1 worked + optional instruction
-      Band 2: empty
-      Band 3: #3 problem only + optional instruction
-      Band 4: #2 worked + optional instruction
-    """
+                       p1_ltx: str, p1_lines: Optional[List[str]], instr1: str,
+                       p2_ltx: str, p2_lines: Optional[List[str]], instr2: str,
+                       p3_ltx: str, p3_lines: Optional[List[str]], instr3: str):
     page_w, page_h = letter
     c = Canvas(out_path, pagesize=letter)
 
-    # Band boundaries from TOP: 0, 2.75, 5.5, 8.25, 11 inches
     y_top = page_h
     y_marks_from_top = [0.0, 2.75 * inch, 5.5 * inch, 8.25 * inch, 11.0 * inch]
-    ys = [y_top - m for m in y_marks_from_top]  # [top, line1, line2, line3, bottom]
+    ys = [y_top - m for m in y_marks_from_top]
 
     def fold_lines_horizontal():
         c.saveState()
@@ -545,12 +437,11 @@ def build_foldable_pdf(out_path: str,
         band_top, band_bottom = band_rect(band_index)
         left = 0.6 * inch
         right = page_w - 0.6 * inch
-        top = band_top - 0.90 * inch   # leave room for fold text + instruction
+        top = band_top - 0.90 * inch
         bottom = band_bottom + 0.45 * inch
         return left, right, bottom, top
 
     def draw_instruction_in_band(band_index: int, text: str):
-        # Put teacher instruction BELOW fold text area
         if not (text or "").strip():
             return
         band_top, _ = band_rect(band_index)
@@ -568,42 +459,32 @@ def build_foldable_pdf(out_path: str,
         usable_h = top - bottom
         lines = (math_lines or [])[:5]
         n = max(1, len(lines))
-
         line_gap = usable_h / (n + 1)
         start_y = top - line_gap
-
         for i, ltx_line in enumerate(lines):
             cy = start_y - i * line_gap
-            _draw_math_centered_autofit(
-                c,
-                ltx_line,
-                cx,
-                cy,
-                (right - left) * 0.97,
-                line_gap * 0.82,
-                start_font=16,
-                min_font=11
-            )
+            _draw_math_centered_autofit(c, ltx_line, cx, cy, (right - left) * 0.97, line_gap * 0.82,
+                                        start_font=16, min_font=11)
 
-    # ---------------- FRONT ----------------
+    # FRONT
     fold_lines_horizontal()
 
-    # Band 1 (top): #2 problem only + fold note + instruction below it
+    # Band 1: #2 problem only
     draw_boxed_label(ys[0], "#2")
     c.setFont("Helvetica-Bold", 12)
     c.drawCentredString(page_w / 2, ys[0] - 0.45 * inch, "Fold center, these two folds facing each other")
     draw_instruction_in_band(0, instr2)
-    draw_math_in_band_center(0, eq2_ltx)
+    draw_math_in_band_center(0, p2_ltx)
 
     # Band 2: #3 worked
     draw_boxed_label(ys[1], "#3")
     c.setFont("Helvetica-Bold", 13)
     c.drawCentredString(page_w / 2, ys[1] - 0.20 * inch, "Fold 3rd. This side out")
     draw_instruction_in_band(1, instr3)
-    if eq3_lines:
-        draw_worked_lines_in_band(1, eq3_lines)
+    if p3_lines:
+        draw_worked_lines_in_band(1, p3_lines)
     else:
-        draw_math_in_band_center(1, eq3_ltx)
+        draw_math_in_band_center(1, p3_ltx)
 
     # Band 3: Open First
     c.setFont("Helvetica-Bold", 13)
@@ -617,11 +498,11 @@ def build_foldable_pdf(out_path: str,
     c.setFont("Helvetica-Bold", 13)
     c.drawCentredString(page_w / 2, ys[3] - 0.20 * inch, "Fold 2nd. Fold under")
     draw_instruction_in_band(3, instr1)
-    draw_math_in_band_center(3, eq1_ltx)
+    draw_math_in_band_center(3, p1_ltx)
 
     c.showPage()
 
-    # ---------------- BACK (rotated 180°) ----------------
+    # BACK rotated
     c.saveState()
     c.translate(page_w, page_h)
     c.rotate(180)
@@ -631,25 +512,25 @@ def build_foldable_pdf(out_path: str,
     # Back Band 1: #1 worked
     draw_boxed_label(ys[0], "#1")
     draw_instruction_in_band(0, instr1)
-    if eq1_lines:
-        draw_worked_lines_in_band(0, eq1_lines)
+    if p1_lines:
+        draw_worked_lines_in_band(0, p1_lines)
     else:
-        draw_math_in_band_center(0, eq1_ltx)
+        draw_math_in_band_center(0, p1_ltx)
 
-    # Back Band 2: empty
+    # Back Band 2 empty
 
     # Back Band 3: #3 problem only
     draw_boxed_label(ys[2], "#3")
     draw_instruction_in_band(2, instr3)
-    draw_math_in_band_center(2, eq3_ltx)
+    draw_math_in_band_center(2, p3_ltx)
 
     # Back Band 4: #2 worked
     draw_boxed_label(ys[3], "#2")
     draw_instruction_in_band(3, instr2)
-    if eq2_lines:
-        draw_worked_lines_in_band(3, eq2_lines)
+    if p2_lines:
+        draw_worked_lines_in_band(3, p2_lines)
     else:
-        draw_math_in_band_center(3, eq2_ltx)
+        draw_math_in_band_center(3, p2_ltx)
 
     c.restoreState()
     c.showPage()
@@ -657,59 +538,60 @@ def build_foldable_pdf(out_path: str,
 
 
 # ============================================================
+# 5) Main: compute problem + lines
+# ============================================================
+
+def compute_problem_and_solution_lines(raw: str) -> Tuple[str, Optional[List[str]]]:
+    """
+    Uses advanced router for Algebra I/II prompts.
+    Returns:
+      - problem latex (original structure as much as possible)
+      - worked lines (math-only), up to 5
+    """
+    res = solve_or_simplify_advanced_prompt(raw)
+    if not res:
+        return r"\mathrm{(blank)}", None
+    return res
+
+
+# ============================================================
 # 6) Streamlit UI
 # ============================================================
 
-st.set_page_config(page_title="Foldable Generator (Word Copy/Paste)", layout="centered")
-st.title("Printable Math Foldable Generator (Word Copy/Paste)")
+st.set_page_config(page_title="Foldable Generator (Advanced Algebra I/II)", layout="centered")
+st.title("Printable Math Foldable Generator (Advanced Algebra I/II)")
 
 st.write(
-    "Paste from Word (Equation tool) or type normally.\n\n"
-    "Now supports prompts like:\n"
-    "• find f(g(x)), if g(x)=x+3 and f(x)=x^2+3\n\n"
-    "Tips:\n"
-    "- `1/2x` is interpreted as `(1/2)x`.\n"
-    "- `√63` is supported.\n"
+    "You can paste from Word *or* type teacher prompts.\n\n"
+    "**Examples:**\n"
+    "- `Simplify 5√63`\n"
+    "- `Solve x^2 + 1 = 0`\n"
+    "- `Solve system: x+y=5 and 2x-y=1`\n"
+    "- `Solve system: x+y+z=6; 2x-y+z=3; x-2y+3z=10`\n"
+    "- `Find f(g(x)) if g(x)=x+3 and f(x)=x^2+3`\n"
 )
 
-with st.expander("Examples to test"):
-    st.markdown(
-        """
-**Radicals**
-- `5√63`  → should simplify to `15√7` in the worked lines  
-- `√48`   → should simplify to `4√3`
-
-**Composition**
-- `find f(g(x)), if g(x)=x+3 and f(x)=x^2+3`
-- `find f(g(2)), if g(x)=2x-1 and f(x)=x^2`
-
-**Equations**
-- `1/2x + 3 = 11`
-- `x^2 - 5x + 6 = 0`
-"""
-    )
-
 i1 = st.text_input("Instruction for Problem #1 (optional)", value="")
-p1 = st.text_area("Problem #1", value="1/2x + 3 = 11", height=70)
+p1 = st.text_area("Problem #1", value="Solve x^2 + 1 = 0", height=70)
 
 i2 = st.text_input("Instruction for Problem #2 (optional)", value="")
-p2 = st.text_area("Problem #2", value="find f(g(x)), if g(x)=x+3 and f(x)=x^2+3", height=70)
+p2 = st.text_area("Problem #2", value="Solve system: x+y=5 and 2x-y=1", height=70)
 
 i3 = st.text_input("Instruction for Problem #3 (optional)", value="")
-p3 = st.text_area("Problem #3", value="5√63", height=70)
+p3 = st.text_area("Problem #3", value="Find f(g(x)) if g(x)=x+3 and f(x)=x^2+3", height=70)
 
 if st.button("Generate Foldable PDF", type="primary"):
     try:
-        eq1_ltx, eq1_lines = compute_problem_and_solution_lines(p1, var="x")
-        eq2_ltx, eq2_lines = compute_problem_and_solution_lines(p2, var="x")
-        eq3_ltx, eq3_lines = compute_problem_and_solution_lines(p3, var="x")
+        l1, lines1 = compute_problem_and_solution_lines(p1)
+        l2, lines2 = compute_problem_and_solution_lines(p2)
+        l3, lines3 = compute_problem_and_solution_lines(p3)
 
         out_path = "foldable_output.pdf"
         build_foldable_pdf(
             out_path,
-            eq1_ltx, eq1_lines, i1,
-            eq2_ltx, eq2_lines, i2,
-            eq3_ltx, eq3_lines, i3
+            l1, lines1, i1,
+            l2, lines2, i2,
+            l3, lines3, i3
         )
 
         with open(out_path, "rb") as f:
@@ -720,13 +602,9 @@ if st.button("Generate Foldable PDF", type="primary"):
                 mime="application/pdf",
             )
 
-        if (eq1_lines is None) or (eq2_lines is None) or (eq3_lines is None):
-            st.info(
-                "PDF generated. If any problem couldn't be solved automatically, "
-                "it will still print as a clean equation."
-            )
+        if (lines1 is None) or (lines2 is None) or (lines3 is None):
+            st.info("PDF generated, but at least one prompt could not be solved/simplified.")
 
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
-
