@@ -231,9 +231,10 @@ def _detect_vars(eqs: List[sp.Eq]) -> List[sp.Symbol]:
     return syms[:3]  # Algebra II scope: up to 3 vars
 
 def _solve_system_lines(equations_raw: List[str]) -> Optional[Tuple[str, List[str]]]:
-    # parse equations
+    # Parse equations
     eqs: List[sp.Eq] = []
     for er in equations_raw:
+        er = er.strip().rstrip(".")
         left_s, right_s = er.split("=", 1)
         left = _parse_expr(left_s, evaluate=True)
         right = _parse_expr(right_s, evaluate=True)
@@ -243,19 +244,29 @@ def _solve_system_lines(equations_raw: List[str]) -> Optional[Tuple[str, List[st
     if not syms:
         return None
 
-    # --- Mathtext-safe "system" display (NO \begin{array}) ---
-    # Use a left brace + manual line breaks
-    # Example: \left\{\ x+y=5\\2x-y=1\right.
-    sys_lines = [sp.latex(e) for e in eqs]
-    prob = r"\left\{\ " + r"\\ ".join(sys_lines) + r"\right."
+    # --- Mathtext-safe ONE-LINE system display (no braces, no \\) ---
+    # Example: x+y=5,\;2x-y=1
+    sys_one_line = r",\; ".join(sp.latex(e) for e in eqs)
+    prob = sys_one_line
 
-    # Solve
+    # Solve (2x2, 3x3, etc.)
     sol = sp.solve(eqs, syms, dict=True)
+
     worked: List[str] = [prob]
 
     if not sol:
         worked.append(r"\therefore\ \mathrm{no\ solution}")
         return prob, worked[:5]
+
+    s0 = sol[0]
+
+    assigns = []
+    for v in syms:
+        assigns.append(sp.latex(v) + "=" + sp.latex(sp.simplify(s0[v])))
+
+    worked.append(r"\therefore\ " + r",\ ".join(assigns))
+    return prob, worked[:5]
+
 
     s0 = sol[0]
 
@@ -672,6 +683,7 @@ if st.button("Generate Foldable PDF", type="primary"):
     except Exception as e:
         st.error("Something went wrong while generating the foldable.")
         st.exception(e)
+
 
 
 
